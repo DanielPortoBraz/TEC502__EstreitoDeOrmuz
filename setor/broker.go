@@ -22,9 +22,9 @@
   4.1 handleServico(...): trata as mensagens de servico, adicionando uma requisição a fila caso o valor esteja acima de 70.
   4.2 handleRecurso(...): mesmo do servico
   4.3 handleBroker(...): associa mensagem dos brokers no map
-  4.4 handleDrone(...): ao ter um item na fila de requisições, envia solicitação de drone (pergunta aos outros Brokers), verifica se todos brokers 
-						do map aprovam a solicitação, e caso aprovem, envia mensagem para que drone venha até ele (dispara requisição para o map de drones), 
-						a conexão será mantida até ocorrer o sinal de conclusão do drone ou uma requisição de maior prioridade ou uma perca de conexão 
+  4.4 handleDrone(...): ao ter um item na fila de requisições, envia solicitação de drone (pergunta aos outros Brokers), verifica se todos brokers
+						do map aprovam a solicitação, e caso aprovem, envia mensagem para que drone venha até ele (dispara requisição para o map de drones),
+						a conexão será mantida até ocorrer o sinal de conclusão do drone ou uma requisição de maior prioridade ou uma perca de conexão
 */
 
 package main
@@ -34,6 +34,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"time"
 )
@@ -41,7 +42,7 @@ import (
 // ----------- Structs ----------
 
 // Identifica Tipo da origem - servico, recurso, drone ou broker
-var base struct {
+type base struct {
 		Tipo string `json:"tipo"`
 		ID   string `json:"id"`
 }
@@ -104,12 +105,15 @@ type Broker struct {
 	chRecurso chan MensagemRecurso
 	chDrone   chan MensagemDrone
 	chBroker  chan MensagemBroker
+
+	// canal broadcast
+	chBroadcast chan MensagemBroker
 }
 
 // ----------- Inicialização ----------
 
 func novoBroker(id string) *Broker {
-	return &Broker{
+	b := &Broker{
 		id: id,
 
 		brokers:  make(map[net.Conn]string),
@@ -119,11 +123,21 @@ func novoBroker(id string) *Broker {
 
 		fila: []Requisicao{},
 
-		chServico: make(chan MensagemServico, 100),
-		chRecurso: make(chan MensagemRecurso, 100),
-		chDrone:   make(chan MensagemDrone, 100),
-		chBroker:  make(chan MensagemBroker, 100),
+		chServico:   make(chan MensagemServico, 100),
+		chRecurso:   make(chan MensagemRecurso, 100),
+		chDrone:     make(chan MensagemDrone, 100),
+		chBroker:    make(chan MensagemBroker, 100),
+		chBroadcast: make(chan MensagemBroker, 100),
 	}
+
+	// goroutine de envio global
+	go func() {
+		for msg := range b.chBroadcast {
+			b.broadcastBroker(msg)
+		}
+	}()
+
+	return b
 }
 
 // ----------- Servidor TCP ----------
@@ -159,6 +173,7 @@ func (b *Broker) handleTCP(conn net.Conn) {
 		return
 	}
 
+	base := base{};
 	err = json.Unmarshal([]byte(msgStr), &base)
 	if err != nil {
 		fmt.Println("Erro no handshake")
@@ -217,6 +232,7 @@ func (b *Broker) registrar(conn net.Conn, tipo string, id string) {
 // ----------- Dispatcher ----------
 func (b *Broker) dispatch(conn net.Conn, data []byte) {
 
+	base := base{};
 	json.Unmarshal(data, &base)
 
 	switch base.Tipo {
@@ -302,20 +318,17 @@ func (b *Broker) handleBroker(msg MensagemBroker) {
 	case "REQUEST":
 		fmt.Println("REQUEST recebido de", msg.ID)
 
-		// TODO: comparar prioridade (Agrawala)
-		// por enquanto responde OK direto
-
 		resp := MensagemBroker{
 			Tipo:  "broker",
 			ID:    b.id,
 			Reply: "OK",
 		}
-
-		b.broadcastBroker(resp)
+		
+		// broadcast da confirmação
+		b.chBroadcast <- resp
 
 	case "OK":
 		fmt.Println("OK recebido de", msg.ID)
-		// TODO: contabilizar confirmações
 	}
 }
 
@@ -392,18 +405,25 @@ func (b *Broker) tentarDespachar() {
 		b.mu.Unlock()
 		return
 	}
+	req := b.fila[0]
 	b.mu.Unlock()
 
-	droneConn := b.escolherDrone()
-
-	if droneConn == nil {
-		fmt.Println("Nenhum drone disponível")
-		return
+	// envia REQUEST para brokers
+	msg := MensagemBroker{
+		Tipo:       "broker",
+		ID:         b.id,
+		Reply:      "REQUEST",
+		Requisicao: req,
 	}
 
-	fmt.Println("Enviando requisição para drone")
+	b.chBroadcast <- msg
 
-	b.enviarParaDrone(droneConn)
+	fmt.Println("REQUEST enviado para brokers")
+
+	droneConn := b.escolherDrone()
+	if droneConn != nil {
+		b.enviarParaDrone(droneConn)
+	}
 }
 
 // broadcast
@@ -428,9 +448,34 @@ func (b *Broker) removerConexao(conn net.Conn) {
 	delete(b.drones, conn)
 }
 
+// Comunicação com outro Broker
+func (b *Broker) handlePeer(address string) {
+	for {
+
+		conn, err := net.Dial("tcp", ":"+address)
+
+		if err == nil {
+			fmt.Println("[Broker] Conectado a", address)
+
+			// handshake
+			data, _ := json.Marshal(MensagemBroker{Tipo: "broker", ID: b.id})
+			conn.Write(append(data, '\n'))
+
+			go b.handleTCP(conn)
+			return
+		}
+
+		fmt.Println("[Broker] Tentando conectar...")
+		time.Sleep(2 * time.Second)
+	}
+}
+
+
 // ----------- Main ----------
 
 func main() {
-	broker := novoBroker("B1")
-	broker.iniciaServidorTCP("8080")
+	// Ao executar o programa, espera-se os argumentos: go run broker.go <ID Broker> <Broker Port> <BrokerPeer Port>
+	broker := novoBroker(os.Args[1])
+	go broker.handlePeer(os.Args[3])
+	broker.iniciaServidorTCP(os.Args[2])
 }
