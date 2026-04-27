@@ -68,7 +68,7 @@ func main() {
 			ID:        id,
 	}
 
-	brokerAddr := "localhost:8080"
+	brokerAddr := "localhost:8001"
 	conn := conectarBroker(brokerAddr, msg)
 	defer conn.Close()
 
