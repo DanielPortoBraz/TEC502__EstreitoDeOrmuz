@@ -16,10 +16,10 @@ import (
 // -------- Struct --------
 
 type MensagemRecurso struct {
-	Tipo      string  `json:"tipo"`
-	ID        string  `json:"id"`
-	Timestamp int64   `json:"timestamp"`
-	Valor     float64 `json:"valor"`
+	Tipo       string  `json:"tipo"`
+	ID         string  `json:"id"`
+	Timestamp  int64   `json:"timestamp"`
+	Prioridade int64 `json:"prioridade"`
 }
 
 // -------- Funções ----------
@@ -45,8 +45,8 @@ func enviarMensagem(conn net.Conn, msg MensagemRecurso) {
 	conn.Write(append(data, '\n'))
 }
 
-func gerarValor() float64 {
-	return rand.Float64() * 100
+func gerarValor() int64 {
+	return int64(rand.Intn(8))
 }
 
 // -------- Main ----------
@@ -63,7 +63,7 @@ func main() {
 			ID:        id,
 	}
 
-	brokerAddr := "localhost:8080"
+	brokerAddr := "localhost:8000"
 	conn := conectarBroker(brokerAddr, msg)
 	defer conn.Close()
 
@@ -73,10 +73,10 @@ func main() {
 
 	for range ticker.C {
 		msg.Timestamp = time.Now().UnixNano()
-		msg.Valor = gerarValor()
+		msg.Prioridade = gerarValor()
 
 		enviarMensagem(conn, msg)
 
-		fmt.Printf("[%s] Valor enviado: %.2f\n", id, msg.Valor)
+		fmt.Printf("[%s] Valor enviado: %d\n", id, msg.Prioridade)
 	}
 }

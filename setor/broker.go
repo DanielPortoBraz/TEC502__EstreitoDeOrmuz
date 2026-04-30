@@ -3,6 +3,7 @@
 // ----------- Structs ----------
 // Requisição: contém prioridade e timestamp
 
+
 // Broker: contém maps[Conn, mensagem] de brokers, servicos, recursos e drones; e a fila de requisições do seu próprio setor
 // ----------- Lógica -------
 /*
@@ -41,16 +42,10 @@ import (
 
 // ----------- Structs ----------
 
-// Identifica Tipo da origem - servico, recurso, drone ou broker
+// Identifica Tipo do remetente - servico, recurso, drone ou broker
 type base struct {
 	Tipo string `json:"tipo"`
 	ID   string `json:"id"`
-}
-
-type Requisicao struct {
-	Prioridade float64 `json:"prioridade"`
-	Timestamp  int64   `json:"timestamp"`
-	Origem     string  `json:"origem"`
 }
 
 // -------- Broker <-> Broker --------
@@ -72,18 +67,18 @@ type MensagemDrone struct {
 
 // -------- Servico --------
 type MensagemServico struct {
-	Tipo      string  `json:"tipo"`
-	ID        string  `json:"id"`
-	Timestamp int64   `json:"timestamp"`
-	Valor     float64 `json:"valor"`
+	Tipo       string  `json:"tipo"`
+	ID         string  `json:"id"`
+	Timestamp  int64   `json:"timestamp"`
+	Prioridade int64 `json:"prioridade"`
 }
 
 // -------- Recurso --------
 type MensagemRecurso struct {
-	Tipo      string  `json:"tipo"`
-	ID        string  `json:"id"`
-	Timestamp int64   `json:"timestamp"`
-	Valor     float64 `json:"valor"`
+	Tipo       string  `json:"tipo"`
+	ID         string  `json:"id"`
+	Timestamp  int64   `json:"timestamp"`
+	Prioridade int64 `json:"prioridade"`
 }
 
 // -------- Broker --------
@@ -104,7 +99,7 @@ type Broker struct {
 	recursos map[net.Conn]string
 	drones   map[net.Conn]string
 
-	fila []Requisicao
+	fila FilaPrioridade
 
 	// canais (dispatcher)
 	chServico chan MensagemServico
@@ -127,7 +122,7 @@ func novoBroker(id string) *Broker {
 		recursos: make(map[net.Conn]string),
 		drones:   make(map[net.Conn]string),
 
-		fila: []Requisicao{},
+		fila: FilaPrioridade{},
 
 		chServico:   make(chan MensagemServico, 100),
 		chRecurso:   make(chan MensagemRecurso, 100),
@@ -288,10 +283,11 @@ func (b *Broker) dispatcher() {
 // Serviço
 func (b *Broker) handleServico(msg MensagemServico) {
 
-	if msg.Valor > 70 {
+	// Requisições de prioridade 0 não são adicionadas na fila
+	if msg.Prioridade > 0 {
 		req := Requisicao{
-			Prioridade: msg.Valor,
-			Timestamp:  time.Now().UnixNano(),
+			Prioridade: msg.Prioridade,
+			Timestamp:  msg.Timestamp,
 			Origem:     msg.ID,
 		}
 
@@ -302,10 +298,11 @@ func (b *Broker) handleServico(msg MensagemServico) {
 // Recurso
 func (b *Broker) handleRecurso(msg MensagemRecurso) {
 
-	if msg.Valor > 70 {
+	// Requisições de prioridade 0 não são adicionadas na fila
+	if msg.Prioridade > 0 {
 		req := Requisicao{
-			Prioridade: msg.Valor,
-			Timestamp:  time.Now().UnixNano(),
+			Prioridade: msg.Prioridade,
+			Timestamp:  msg.Timestamp,
 			Origem:     msg.ID,
 		}
 
@@ -419,8 +416,8 @@ func (b *Broker) handleDrone(msg MensagemDrone) {
 
 		b.mu.Lock()
 
-		if len(b.fila) > 0 {
-			b.fila = b.fila[1:]
+		if len(b.fila.Itens) > 0 {
+			b.fila.Remove()
 		}
 
 		b.inCS = false
@@ -476,13 +473,11 @@ func (b *Broker) adicionarFila(req Requisicao) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.fila = append(b.fila, req)
+	b.fila.Push(req)
 
 	fmt.Println("Fila:")
 
-	for i := range b.fila {
-		fmt.Printf("%d - [\nID: %s\nPrioridade: %.2f\nTimeStamp:%d\n]\n", i, b.fila[i].Origem, b.fila[i].Prioridade, b.fila[i].Timestamp)
-	}
+	b.fila.Listar()
 
 	// dispara tentativa de uso de drone
 	go b.tentarDespachar()
@@ -495,7 +490,7 @@ func (b *Broker) tentarDespachar() {
 	b.mu.Lock()
 
 	// Não faz nada se: fila vazia, já estamos pedindo, ou já estamos na CS
-	if len(b.fila) == 0 || b.requesting || b.inCS {
+	if len(b.fila.Itens) == 0 || b.requesting || b.inCS {
 		b.mu.Unlock()
 		return
 	}
@@ -503,7 +498,7 @@ func (b *Broker) tentarDespachar() {
 	// Marca que estamos pedindo acesso
 	b.requesting = true
 	b.okCount = 0
-	b.currentReq = b.fila[0]
+	b.currentReq = *b.fila.Remove()
 	totalPeers := len(b.brokers)
 	req := b.currentReq
 

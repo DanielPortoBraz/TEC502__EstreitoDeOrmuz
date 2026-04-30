@@ -153,7 +153,7 @@ func (d *Drone) executarTarefa(conn net.Conn) {
 func main() {
 
 	brokers := []string{
-		"localhost:8080",
+		"localhost:8000",
 		"localhost:8001",
 	}
 
