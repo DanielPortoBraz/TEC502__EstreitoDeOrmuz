@@ -38,6 +38,8 @@ type Drone struct {
 // -------- Inicialização --------
 
 func novoDrone(id string, brokers []string) *Drone {
+	fmt.Printf("(%s) [Drone %s] - [INIT]: iniciado (estado=FREE)\n", timeStamp(), id)
+
 	return &Drone{
 		id:      id,
 		estado:  FREE,
@@ -57,17 +59,18 @@ func (d *Drone) conectarBroker(addr string) {
 	for {
 		conn, err := net.Dial("tcp", addr)
 		if err != nil {
-			fmt.Println("Erro ao conectar ao broker:", addr)
+			fmt.Printf("(%s) [Drone %s] - [CONN]: erro ao conectar %s\n", timeStamp(), d.id, addr)
 			time.Sleep(2 * time.Second)
 			continue
 		}
 
-		fmt.Println("Conectado ao broker:", addr)
+		fmt.Printf("(%s) [Drone %s] - [CONN]: conectado ao broker %s\n", timeStamp(), d.id, addr)
+
 		d.enviarMensagem(conn, "conexao", false)
 
 		d.handleConn(conn)
 
-		fmt.Println("Desconectado do broker:", addr)
+		fmt.Printf("(%s) [Drone %s] - [CONN]: desconectado do broker %s\n", timeStamp(), d.id, addr)
 		time.Sleep(2 * time.Second)
 	}
 }
@@ -82,6 +85,7 @@ func (d *Drone) handleConn(conn net.Conn) {
 	for {
 		msgStr, err := reader.ReadString('\n')
 		if err != nil {
+			fmt.Printf("(%s) [Drone %s] - [CONN]: conexão encerrada\n", timeStamp(), d.id)
 			return
 		}
 
@@ -107,7 +111,7 @@ func (d *Drone) enviarMensagem(conn net.Conn, acao string, sinal bool) {
 	conn.Write(append(data, '\n'))
 }
 
-// -------- Lógica --------
+// -------- Tratamento de Mensagens do Broker --------
 
 func (d *Drone) handleMensagem(conn net.Conn, msg MensagemDrone) {
 
@@ -116,7 +120,7 @@ func (d *Drone) handleMensagem(conn net.Conn, msg MensagemDrone) {
 		d.mu.Lock()
 
 		if d.estado == BUSY {
-			fmt.Println("Drone ocupado, ignorando requisição")
+			fmt.Printf("(%s) [Drone %s] - [DRONE]: ocupado, ignorando requisição\n", timeStamp(), d.id)
 			d.mu.Unlock()
 			return
 		}
@@ -124,7 +128,7 @@ func (d *Drone) handleMensagem(conn net.Conn, msg MensagemDrone) {
 		d.estado = BUSY
 		d.mu.Unlock()
 
-		fmt.Println("Requisição aceita de broker")
+		fmt.Printf("(%s) [Drone %s] - [DRONE]: requisição aceita\n", timeStamp(), d.id)
 
 		go d.executarTarefa(conn)
 	}
@@ -132,20 +136,40 @@ func (d *Drone) handleMensagem(conn net.Conn, msg MensagemDrone) {
 
 func (d *Drone) executarTarefa(conn net.Conn) {
 
+	// INÍCIO
+	fmt.Printf("(%s) [Drone %s] - [DRONE]: tarefa iniciada\n", timeStamp(), d.id)
+
 	// andamento
 	d.enviarMensagem(conn, "andamento", false)
+	fmt.Printf("(%s) [Drone %s] - [DRONE]: em execução\n", timeStamp(), d.id)
 
 	// simulação de trabalho
 	time.Sleep(5 * time.Second)
 
 	// conclusão
 	d.enviarMensagem(conn, "conclusao", true)
-
-	fmt.Println("Tarefa concluída")
+	fmt.Printf("(%s) [Drone %s] - [DRONE]: tarefa concluída\n", timeStamp(), d.id)
 
 	d.mu.Lock()
 	d.estado = FREE
 	d.mu.Unlock()
+
+	fmt.Printf("(%s) [Drone %s] - [DRONE]: estado=FREE\n", timeStamp(), d.id)
+}
+
+// -------- Utils --------
+
+// Retorna timeStamp atual
+func timeStamp() string{
+	currentTime := time.Now()
+
+	return (fmt.Sprintf("%d-%d-%d %d:%d:%d",
+		currentTime.Day(),
+		currentTime.Month(),
+		currentTime.Year(),
+		currentTime.Hour(),
+		currentTime.Minute(),
+		currentTime.Second()))
 }
 
 // -------- Main --------

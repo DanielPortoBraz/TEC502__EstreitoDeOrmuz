@@ -1,8 +1,3 @@
-// Recurso: se conecta por TCP ao Broker e envia dados continuamente (a cada 1s)
-
-// -------- Struct --------
-// Envia dados aleatórios no intervalo de 0 a 100
-
 package main
 
 import (
@@ -16,10 +11,20 @@ import (
 // -------- Struct --------
 
 type MensagemRecurso struct {
-	Tipo       string  `json:"tipo"`
-	ID         string  `json:"id"`
-	Timestamp  int64   `json:"timestamp"`
-	Prioridade int64 `json:"prioridade"`
+	Tipo       string `json:"tipo"`
+	ID         string `json:"id"`
+	Timestamp  int64  `json:"timestamp"`
+	Prioridade int64  `json:"prioridade"`
+}
+
+// -------- Utils --------
+
+func timeStamp() string {
+	t := time.Now()
+	return fmt.Sprintf("%02d:%02d:%02d",
+		t.Hour(),
+		t.Minute(),
+		t.Second())
 }
 
 // -------- Funções ----------
@@ -28,21 +33,24 @@ func conectarBroker(addr string, msg MensagemRecurso) net.Conn {
 	for {
 		conn, err := net.Dial("tcp", addr)
 		if err != nil {
-			fmt.Println("Erro ao conectar ao broker:", err)
+			fmt.Printf("(%s) [Recurso %s] - [CONN]: erro ao conectar %s\n", timeStamp(), msg.ID, addr)
 			time.Sleep(2 * time.Second)
 			continue
 		}
 
-		// Mensagem para indicar primeira conexão
+		fmt.Printf("(%s) [Recurso %s] - [CONN]: conectado ao broker %s\n", timeStamp(), msg.ID, addr)
+
+		// handshake inicial
 		enviarMensagem(conn, msg)
-		fmt.Println("Conectado ao broker:", addr)
+
 		return conn
 	}
 }
 
-func enviarMensagem(conn net.Conn, msg MensagemRecurso) {
+func enviarMensagem(conn net.Conn, msg MensagemRecurso) error {
 	data, _ := json.Marshal(msg)
-	conn.Write(append(data, '\n'))
+	_, err := conn.Write(append(data, '\n'))
+	return err
 }
 
 func gerarValor() int64 {
@@ -55,28 +63,39 @@ func main() {
 
 	rand.Seed(time.Now().UnixNano())
 
-	id := fmt.Sprintf("recurso-%d", rand.Intn(1000))
+	id := fmt.Sprintf("Recurso-%d", rand.Intn(1000))
 
 	// Mensagem Base do Recurso em execução
 	msg := MensagemRecurso{
-			Tipo:      "recurso",
-			ID:        id,
+		Tipo: "recurso",
+		ID:   id,
 	}
 
-	brokerAddr := "localhost:8000"
+	brokerAddr := "localhost:8001"
 	conn := conectarBroker(brokerAddr, msg)
 	defer conn.Close()
-
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
+
 		msg.Timestamp = time.Now().UnixNano()
 		msg.Prioridade = gerarValor()
 
-		enviarMensagem(conn, msg)
+		err := enviarMensagem(conn, msg)
 
-		fmt.Printf("[%s] Valor enviado: %d\n", id, msg.Prioridade)
+		// tratamento de falha + reconexão
+		if err != nil {
+			fmt.Printf("(%s) [Recurso %s] - [CONN]: falha ao enviar, reconectando...\n", timeStamp(), id)
+
+			conn.Close()
+			conn = conectarBroker(brokerAddr, msg)
+
+			continue
+		}
+
+		fmt.Printf("(%s) [Recurso %s] - [Recurso]: Prioridade enviada=%d\n",
+			timeStamp(), id, msg.Prioridade)
 	}
 }
