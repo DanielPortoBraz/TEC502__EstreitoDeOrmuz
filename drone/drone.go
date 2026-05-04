@@ -16,6 +16,7 @@ type MensagemDrone struct {
 	ID    string `json:"id"`
 	Acao  string `json:"acao"` // requisicao | andamento | conclusao
 	Sinal bool   `json:"sinal"`
+	Timestamp int64 `json:"timestamp"`
 }
 
 // -------- Estados --------
@@ -33,6 +34,31 @@ type Drone struct {
 	id     string
 
 	brokers []string
+}
+
+// ---------- Heartbeat -----------
+
+func heartbeat(conn net.Conn, id string, timeout time.Duration) {
+	ticker := time.NewTicker(timeout / 2) // checa 2x mais rápido que o timeout
+	defer ticker.Stop()
+
+	for range ticker.C {
+
+		// tentativa de escrita (ping)
+		msg := MensagemDrone{
+			Tipo:      "drone",
+			ID:        id,
+			Acao: "heartbeat",
+			Timestamp: time.Now().UnixNano(),
+		}
+
+		data, _ := json.Marshal(msg)
+
+		_, err := conn.Write(append(data, '\n'))
+		if err != nil {
+			return
+		}	
+	}
 }
 
 // -------- Inicialização --------
@@ -65,6 +91,8 @@ func (d *Drone) conectarBroker(addr string) {
 		}
 
 		fmt.Printf("(%s) [Drone %s] - [CONN]: conectado ao broker %s\n", timeStamp(), d.id, addr)
+
+		go heartbeat(conn, d.id, 5*time.Second)
 
 		d.enviarMensagem(conn, "conexao", false)
 
@@ -105,6 +133,7 @@ func (d *Drone) enviarMensagem(conn net.Conn, acao string, sinal bool) {
 		ID:    d.id,
 		Acao:  acao,
 		Sinal: sinal,
+		Timestamp: time.Now().UnixNano(),
 	}
 
 	data, _ := json.Marshal(msg)

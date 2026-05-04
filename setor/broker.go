@@ -55,10 +55,11 @@ type Broker struct {
 	okCount    int        // OKs recebidos no round atual
 	deferred   []net.Conn // conns de peers cujo OK foi adiado; receberão OK após sair da CS
 
-	brokers  map[net.Conn]string
-	servicos map[net.Conn]string
-	recursos map[net.Conn]string
-	drones   map[net.Conn]string
+	// Maps de gerenciamento das conexões vivas
+	brokers  map[net.Conn]MensagemBroker
+	servicos map[net.Conn]MensagemServico
+	recursos map[net.Conn]MensagemRecurso
+	drones   map[net.Conn]MensagemDrone
 
 	fila FilaPrioridade
 
@@ -78,10 +79,10 @@ func novoBroker(id string) *Broker {
 	b := &Broker{
 		id: id,
 
-		brokers:  make(map[net.Conn]string),
-		servicos: make(map[net.Conn]string),
-		recursos: make(map[net.Conn]string),
-		drones:   make(map[net.Conn]string),
+		brokers:  make(map[net.Conn]MensagemBroker),
+		servicos: make(map[net.Conn]MensagemServico),
+		recursos: make(map[net.Conn]MensagemRecurso),
+		drones:   make(map[net.Conn]MensagemDrone),
 
 		fila: FilaPrioridade{},
 
@@ -144,7 +145,7 @@ func (b *Broker) handleTCP(conn net.Conn) {
 
 	// Registra a conn no map apenas se não for um broker peer.
 	if base.Tipo != "broker" {
-		b.registrar(conn, base.Tipo, base.ID)
+		b.registrar(conn, base)
 	}
 
 	// Loop dispatcher
@@ -175,21 +176,25 @@ func (b *Broker) handlePeer(address string) {
 		fmt.Printf("(%s) [Broker %s] - [PEER]: tentando conectar %s\n", timeStamp(), b.id, address)
 		time.Sleep(2 * time.Second)
 	}
-
+	
 	fmt.Printf("(%s) [Broker %s] - [PEER]: conectado %s\n", timeStamp(), b.id, address)
 
+	
 	data, _ := json.Marshal(MensagemBroker{Tipo: "broker", ID: b.id})
 	conn.Write(append(data, '\n'))
-
-	b.registrar(conn, "broker", address)
+	
+	b.registrar(conn, base{Tipo: "broker", ID: address, Timestamp: time.Now().UnixNano()})
+	
+	// Heartbeat para outros Brokers (utiliza broadcast)
+	go b.heartbeatSender(conn, 5*time.Second)
 
 	for msg := range b.chBroadcast {
-		fmt.Printf("(%s) [Broker %s] - [PEER]: enviando %s\n", timeStamp(), b.id, msg.Reply)
+		fmt.Printf("(%s) [Broker %s] - [PEER-BROADCAST]: enviando %s\n", timeStamp(), b.id, msg.Reply)
 
 		payload, _ := json.Marshal(msg)
 		_, err := conn.Write(append(payload, '\n'))
 		if err != nil {
-			fmt.Printf("(%s) [Broker %s] - [PEER]: erro envio\n", timeStamp(), b.id)
+			fmt.Printf("(%s) [Broker %s] - [PEER-BROADCAST]: erro envio\n", timeStamp(), b.id)
 			b.removerConexao(conn)
 			return
 		}
@@ -197,33 +202,38 @@ func (b *Broker) handlePeer(address string) {
 }
 
 // Registrar Conexão
-func (b *Broker) registrar(conn net.Conn, tipo string, id string) {
+func (b *Broker) registrar(conn net.Conn, msg base) {
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	fmt.Printf("(%s) [Broker %s] - [REG]: tipo=%s id=%s\n", timeStamp(), b.id, tipo, id)
+	fmt.Printf("(%s) [Broker %s] - [REG]: tipo=%s id=%s ts=%d\n",
+		timeStamp(), b.id, msg.Tipo, msg.ID, msg.Timestamp)
 
-	switch tipo {
+	switch msg.Tipo {
 
 	case "servico":
-		if _, ok := b.servicos[conn]; !ok {
-			b.servicos[conn] = id
+		b.servicos[conn] = MensagemServico{
+			ID:        msg.ID,
+			Timestamp: msg.Timestamp,
 		}
 
 	case "recurso":
-		if _, ok := b.recursos[conn]; !ok {
-			b.recursos[conn] = id
+		b.recursos[conn] = MensagemRecurso{
+			ID:        msg.ID,
+			Timestamp: msg.Timestamp,
 		}
 
 	case "drone":
-		if _, ok := b.drones[conn]; !ok {
-			b.drones[conn] = id
+		b.drones[conn] = MensagemDrone{
+			ID:        msg.ID,
+			Timestamp: msg.Timestamp,
 		}
 
 	case "broker":
-		if _, ok := b.brokers[conn]; !ok {
-			b.brokers[conn] = id
+		b.brokers[conn] = MensagemBroker{
+			ID:        msg.ID,
+			Timestamp: msg.Timestamp,
 		}
 	}
 }
@@ -287,6 +297,17 @@ func (b *Broker) handleServico(msg MensagemServico) {
 	
 	fmt.Printf("(%s) [Broker %s] - [SERVICO]: id=%s prioridade=%d\n", timeStamp(), b.id, msg.ID, msg.Prioridade)
 	
+	// Atualiza timestamp 
+	b.mu.Lock()
+	for conn, s := range b.servicos {
+		if s.ID == msg.ID {
+			s.Timestamp = msg.Timestamp
+			b.servicos[conn] = s
+			break
+		}
+	}
+	b.mu.Unlock()
+
 	if msg.Prioridade > 0 {
 		req := Requisicao{msg.Prioridade, msg.Timestamp, msg.ID}
 		b.adicionarFila(req)
@@ -297,18 +318,42 @@ func (b *Broker) handleRecurso(msg MensagemRecurso) {
 
 	fmt.Printf("(%s) [Broker %s] - [RECURSO]: id=%s prioridade=%d\n", timeStamp(), b.id, msg.ID, msg.Prioridade)
 	
+	// Atualiza timestamp
+	b.mu.Lock()
+	for conn, r := range b.recursos {
+		if r.ID == msg.ID {
+			r.Timestamp = msg.Timestamp
+			b.recursos[conn] = r
+			break
+		}
+	}
+	b.mu.Unlock()
+
 	if msg.Prioridade > 0 {
+
 		req := Requisicao{msg.Prioridade, msg.Timestamp, msg.ID}
 		b.adicionarFila(req)
 	}
 }
 
-// Gerencia a recepção e envio de mensagens de Broker com base no algoritmo Ricarti Agrawala 
+// Gerencia a recepção e o envio de mensagens de Broker com base no algoritmo Ricarti Agrawala 
 func (b *Broker) handleBroker(msg MensagemBroker) {
 	
-	fmt.Printf("(%s) [Broker %s] - [RA]: msg=%s origem=%s\n", timeStamp(), b.id, msg.Reply, msg.ID)
+	fmt.Printf("(%s) [Broker %s] - [BROKER]: msg=%s origem=%s\n", timeStamp(), b.id, msg.Reply, msg.ID)
 	
 	switch msg.Reply {
+
+	// Apenas mensagem de heartbeat para indicar que a conexão está viva
+	case "HEARTBEAT":
+		b.mu.Lock()
+		for conn, br := range b.brokers {
+			if br.ID == msg.ID {
+				br.Timestamp = msg.Timestamp
+				b.brokers[conn] = br
+				break
+			}
+		}
+		b.mu.Unlock()
 
 	case "REQUEST":
 		fmt.Printf("(%s) [Broker %s] - [RA]: REQUEST recebido\n", timeStamp(), b.id)
@@ -353,35 +398,50 @@ func (b *Broker) handleBroker(msg MensagemBroker) {
 }
 
 func (b *Broker) handleDrone(msg MensagemDrone) {
-	
-	fmt.Printf("(%s) [Broker %s] - [DRONE]: msg de %s sinal=%v\n", timeStamp(), b.id, msg.ID, msg.Sinal)
-	
+
+	fmt.Printf("(%s) [Broker %s] - [DRONE]: msg de %s sinal=%v\n",
+		timeStamp(), b.id, msg.ID, msg.Sinal)
+
+	// Atualiza timestamp do drone
+	b.mu.Lock()
+	for conn, d := range b.drones {
+		if d.ID == msg.ID {
+			d.Timestamp = msg.Timestamp
+			b.drones[conn] = d
+			break
+		}
+	}
+	b.mu.Unlock()
+
 	if msg.Sinal {
-		fmt.Printf("(%s) [Broker %s] - [DRONE]: conclusão recebida\n", timeStamp(), b.id)
-		
+		fmt.Printf("(%s) [Broker %s] - [DRONE]: conclusão recebida\n",
+			timeStamp(), b.id)
+
 		b.mu.Lock()
-		
+
 		if len(b.fila.Itens) > 0 {
 			b.fila.Remove()
 		}
-		
+
 		b.inCS = false
-		
+
 		pendentes := b.deferred
 		b.deferred = nil
-		
+
 		b.mu.Unlock()
-		
+
 		for _, conn := range pendentes {
-			fmt.Printf("(%s) [Broker %s] - [DRONE]: enviando OK adiado\n", timeStamp(), b.id)
+			fmt.Printf("(%s) [Broker %s] - [DRONE]: enviando OK adiado\n",
+				timeStamp(), b.id)
 			b.enviarOK(conn)
 		}
-		
+
 		go b.tentarDespachar()
-		
-		} else {
-			fmt.Printf("(%s) [Broker %s] - [DRONE]: executando %s\n", timeStamp(), b.id, msg.Acao)
-		}
+
+	} else {
+		fmt.Printf("(%s) [Broker %s] - [DRONE]: executando %s\n",
+			timeStamp(), b.id, msg.Acao)
+	}
 }
 
 // ----------- Ricart-Agrawala ----------
@@ -540,10 +600,118 @@ func timeStamp() string{
 		currentTime.Second()))
 }
 
+// HeartbeatSender: Envia heartbeat a todos os Brokers pra sinalizar que este Broker está conectado
+func (b *Broker) heartbeatSender(conn net.Conn, timeout time.Duration) {
+	ticker := time.NewTicker(timeout / 2)
+	
+	fmt.Println("HEARTBEATSENDER INICIADO")
+	defer ticker.Stop()
+
+	for range ticker.C {
+
+		// -------- BROKERS (broadcast) --------
+		msg := MensagemBroker{
+			Tipo:      "broker",
+			ID:        b.id,
+			Reply:     "HEARTBEAT",
+			Timestamp: time.Now().UnixNano(),
+		}
+
+		data, _ := json.Marshal(msg)
+		conn.Write(append(data, '\n'))
+	}
+}
+
+// HeartbeatMonitor: monitora sinais de conexão ativa de todos os dispositivos
+func (b *Broker) heartbeatMonitor(timeout time.Duration) {
+
+	ticker := time.NewTicker(timeout)
+	defer ticker.Stop()
+
+	fmt.Println("HEARTBEAT MONITOR INICIADO")
+
+	for range ticker.C {
+
+		now := time.Now().UnixNano()
+
+		var mortosDrones []net.Conn
+		var mortosBrokers []net.Conn
+		var mortosServicos []net.Conn
+		var mortosRecursos []net.Conn
+
+		b.mu.Lock()
+
+		// -------- DRONES --------
+		for conn, msg := range b.drones {
+			if msg.Timestamp == 0 {
+				continue // ainda não recebeu heartbeat
+			}
+
+			if now-msg.Timestamp > int64(timeout)*2 {
+				fmt.Printf("(%s) [HB]: DRONE %s morto\n",
+					timeStamp(), msg.ID)
+
+				mortosDrones = append(mortosDrones, conn)
+			}
+		}
+
+		// -------- BROKERS --------
+		// !!!!!!!!! Broker ainda está com bug por não ser registrado com ID correto no map de Brokers !!!!!!!!!!!!!
+		
+		// -------- SERVIÇOS --------
+		for conn, msg := range b.servicos {
+			if msg.Timestamp == 0 {
+				continue
+			}
+
+			if now-msg.Timestamp > int64(timeout)*2 {
+				fmt.Printf("(%s) [HB]: SERVICO %s morto\n",
+					timeStamp(), msg.ID)
+
+				mortosServicos = append(mortosServicos, conn)
+			}
+		}
+
+		// -------- RECURSOS --------
+		for conn, msg := range b.recursos {
+			if msg.Timestamp == 0 {
+				continue
+			}
+
+			if now-msg.Timestamp > int64(timeout)*2 {
+				fmt.Printf("(%s) [HB]: RECURSO %s morto\n",
+					timeStamp(), msg.ID)
+
+				mortosRecursos = append(mortosRecursos, conn)
+			}
+		}
+
+		b.mu.Unlock()
+
+		// -------- REMOÇÃO FORA DO LOCK --------
+		for _, conn := range mortosDrones {
+			b.removerConexao(conn)
+		}
+
+		for _, conn := range mortosBrokers {
+			b.removerConexao(conn)
+		}
+
+		for _, conn := range mortosServicos {
+			b.removerConexao(conn)
+		}
+
+		for _, conn := range mortosRecursos {
+			b.removerConexao(conn)
+		}
+	}
+}
+
 // ----------- Main ----------
 
 func main() {
 	broker := novoBroker(os.Args[1])
 	go broker.handlePeer(os.Args[3])
+	go broker.heartbeatMonitor(5 * time.Second)
 	broker.iniciaServidorTCP(os.Args[2])
 }

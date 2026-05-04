@@ -57,18 +57,42 @@ func gerarValor() int64 {
 	return int64(rand.Intn(8))
 }
 
+// -------- HEARTBEAT ----------
+
+func heartbeat(conn net.Conn, id string, timeout time.Duration) {
+	ticker := time.NewTicker(timeout / 2) // checa 2x mais rápido que o timeout
+	defer ticker.Stop()
+
+	for range ticker.C {
+
+		// tentativa de escrita (ping)
+		msg := MensagemServico{
+			Tipo:      "servico",
+			ID:        id,
+			Timestamp: time.Now().UnixNano(),
+		}
+
+		data, _ := json.Marshal(msg)
+
+		_, err := conn.Write(append(data, '\n'))
+		if err != nil {
+			return
+		}	
+	}
+}
+
 // -------- Main ----------
 
 func main() {
 
 	rand.Seed(time.Now().UnixNano())
 
-	id := fmt.Sprintf("servico-%d", rand.Intn(1000))
+	id := fmt.Sprintf("Servico-%d", rand.Intn(1000))
 
-	// Mensagem Base do Servico em execução
 	msg := MensagemServico{
 		Tipo: "servico",
 		ID:   id,
+		Timestamp: time.Now().UnixNano(),
 	}
 
 	brokerAddr := "localhost:8000"
@@ -78,24 +102,27 @@ func main() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	// inicia heartbeat
+	go heartbeat(conn, id, 5*time.Second)
 
+	for range ticker.C {
 		msg.Timestamp = time.Now().UnixNano()
 		msg.Prioridade = gerarValor()
 
 		err := enviarMensagem(conn, msg)
 
-		// tratamento de falha + reconexão
 		if err != nil {
-			fmt.Printf("(%s) [Servico %s] - [CONN]: falha ao enviar, reconectando...\n", timeStamp(), id)
+			fmt.Printf("(%s) [Servico %s] - [CONN]: falha ao enviar, reconectando...\n",
+				timeStamp(), id)
 
 			conn.Close()
 			conn = conectarBroker(brokerAddr, msg)
 
+			go heartbeat(conn, id, 5*time.Second)
 			continue
 		}
 
-		fmt.Printf("(%s) [Servico %s] - [SERVICO]: Prioridade enviada=%d\n",
+		fmt.Printf("(%s) [Servico %s] - [Servico]: Prioridade enviada=%d\n",
 			timeStamp(), id, msg.Prioridade)
 	}
 }
