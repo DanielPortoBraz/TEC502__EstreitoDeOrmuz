@@ -69,9 +69,6 @@ type Broker struct {
 	chRecurso chan MensagemRecurso
 	chDrone   chan MensagemDrone
 	chBroker  chan MensagemBroker
-
-	// canal broadcast
-	chBroadcast chan MensagemBroker
 }
 
 // ----------- Inicialização ----------
@@ -91,7 +88,6 @@ func novoBroker(id string) *Broker {
 		chRecurso:   make(chan MensagemRecurso, 100),
 		chDrone:     make(chan MensagemDrone, 100),
 		chBroker:    make(chan MensagemBroker, 100),
-		chBroadcast: make(chan MensagemBroker, 100),
 	}
 
 	fmt.Printf("(%s) [Broker %s] - [INIT]: Broker criado\n", timeStamp(), id)
@@ -110,6 +106,9 @@ func (b *Broker) iniciaServidorTCP(porta string) {
 	fmt.Printf("(%s) [Broker %s] - [INIT]: rodando na porta %s\n", timeStamp(), b.id, porta)
 
 	go b.dispatcher()
+
+	// Heartbeat para outros Brokers (utiliza broadcast)
+	go b.heartbeatSender(5*time.Second)
 
 	for {
 		conn, _ := listener.Accept()
@@ -144,7 +143,7 @@ func (b *Broker) handleTCP(conn net.Conn) {
 
 	fmt.Printf("(%s) [Broker %s] - [TCP]: handshake tipo=%s id=%s\n", timeStamp(), b.id, base.Tipo, base.ID)
 
-	// Registraãa conn no map apenas se não for um broker peer (peers são registrados pela porta em handlePeer).
+	// Registra conn no map apenas se não for um broker peer (peers são registrados pela porta em handlePeer).
 	if base.Tipo != "broker" {
 		b.registrar(conn, base)
 	}
@@ -183,22 +182,32 @@ func (b *Broker) handlePeer(address string) {
 	
 	data, _ := json.Marshal(MensagemBroker{Tipo: "broker", ID: b.id})
 	conn.Write(append(data, '\n'))
-	
+
+	// Registro de Broker remoto ocorre aqui para obter conn de outra porta
 	b.registrar(conn, base{Tipo: "broker", ID: address, Timestamp: time.Now().UnixNano()})
-	
-	// Heartbeat para outros Brokers (utiliza broadcast)
-	go b.heartbeatSender(conn, 5*time.Second)
+}
 
-	for msg := range b.chBroadcast {
-		fmt.Printf("(%s) [Broker %s] - [PEER-BROADCAST]: enviando %s\n", timeStamp(), b.id, msg.Reply)
+// Broadcast entre Brokers (peers)
+func (b *Broker) broadcast(msg MensagemBroker) {
+	b.mu.Lock()
 
-		payload, _ := json.Marshal(msg)
-		_, err := conn.Write(append(payload, '\n'))
+	var toRemove []net.Conn
+	data, _ := json.Marshal(msg)
+
+	for conn := range b.brokers {
+		_, err := conn.Write(append(data, '\n'))
 		if err != nil {
-			fmt.Printf("(%s) [Broker %s] - [PEER-BROADCAST]: erro envio\n", timeStamp(), b.id)
-			b.removerConexao(conn)
-			return
+			fmt.Printf("(%s) [BROADCAST]: erro -> marcando remoção\n", timeStamp())
+			conn.Close()
+			toRemove = append(toRemove, conn)
 		}
+	}
+
+	b.mu.Unlock()
+
+	// remove FORA do lock
+	for _, conn := range toRemove {
+		b.removerConexao(conn)
 	}
 }
 
@@ -382,7 +391,7 @@ func (b *Broker) handleBroker(msg MensagemBroker) {
 		if cederPassagem {
 			b.mu.Unlock()
 			fmt.Printf("(%s) [Broker %s] - [RA]: enviando OK\n", timeStamp(), b.id)
-			b.chBroadcast <- MensagemBroker{Tipo: "broker", ID: b.id, Reply: "OK"} // Envia Ok ao Broker remoto que solicitou
+			b.broadcast(MensagemBroker{Tipo: "broker", ID: b.id, Reply: "OK"}) // Envia Ok ao Broker remoto que solicitou
 		} else {
 			for conn := range b.brokers {
 				b.deferred = append(b.deferred, conn) // Guarda conn de Broker remoto para enviar Ok após o Broker local sair da região crítica
@@ -592,7 +601,7 @@ func (b *Broker) tentarDespachar() {
 		Requisicao: req,
 	}
 	
-	b.chBroadcast <- msg
+	b.broadcast(msg)
 	fmt.Printf("(%s) [Broker %s] - [RA]: REQUEST enviado\n", timeStamp(), b.id)
 }
 
@@ -624,15 +633,21 @@ func timeStamp() string{
 }
 
 // HeartbeatSender: Envia heartbeat a todos os Brokers pra sinalizar que este Broker está conectado
-func (b *Broker) heartbeatSender(conn net.Conn, timeout time.Duration) {
+func (b *Broker) heartbeatSender(timeout time.Duration) {
 	ticker := time.NewTicker(timeout / 2)
-	
-	fmt.Println("HEARTBEATSENDER INICIADO")
 	defer ticker.Stop()
+
+	fmt.Println("HEARTBEATSENDER INICIADO")
 
 	for range ticker.C {
 
-		// -------- BROKERS (broadcast) --------
+		b.mu.Lock()
+		if len(b.brokers) == 0 {
+			b.mu.Unlock()
+			continue
+		}
+		b.mu.Unlock()
+
 		msg := MensagemBroker{
 			Tipo:      "broker",
 			ID:        b.id,
@@ -640,8 +655,7 @@ func (b *Broker) heartbeatSender(conn net.Conn, timeout time.Duration) {
 			Timestamp: time.Now().UnixNano(),
 		}
 
-		data, _ := json.Marshal(msg)
-		conn.Write(append(data, '\n'))
+		b.broadcast(msg)
 	}
 }
 
@@ -733,8 +747,11 @@ func (b *Broker) heartbeatMonitor(timeout time.Duration) {
 // ----------- Main ----------
 
 func main() {
-	broker := novoBroker(os.Args[1])
-	go broker.handlePeer(os.Args[3])
+	broker := novoBroker(os.Args[1]) // ID do Broker é a própria porta em que está rodando
+	
+	for i := 2; i < len(os.Args); i++ {
+		go broker.handlePeer(os.Args[i])
+	}
 	go broker.heartbeatMonitor(5 * time.Second)
-	broker.iniciaServidorTCP(os.Args[2])
+	broker.iniciaServidorTCP(os.Args[1])
 }

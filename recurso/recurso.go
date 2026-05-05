@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"os"
 	"time"
 )
 
@@ -95,7 +96,7 @@ func main() {
 		Timestamp: time.Now().UnixNano(),
 	}
 
-	brokerAddr := "localhost:8001"
+	brokerAddr := ":" + os.Args[1]
 	conn := conectarBroker(brokerAddr, msg)
 	defer conn.Close()
 

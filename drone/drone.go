@@ -216,6 +216,8 @@ func main() {
 	brokers := []string{
 		"localhost:8000",
 		"localhost:8001",
+		"localhost:8002",
+		"localhost:8003",
 	}
 
 	id := fmt.Sprintf("drone-%d", time.Now().UnixNano()%10000)
