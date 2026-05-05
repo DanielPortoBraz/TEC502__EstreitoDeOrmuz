@@ -21,11 +21,12 @@ type MensagemBroker struct {
 
 // -------- Drone --------
 type MensagemDrone struct {
-	Tipo      string `json:"tipo"`
-	ID        string `json:"id"`
-	Acao      string `json:"acao"` // requisicao | andamento | conclusao | heartbeat
-	Sinal     bool   `json:"sinal"`
-	Timestamp int64  `json:"timestamp"`
+	Tipo  string `json:"tipo"`
+	ID    string `json:"id"`
+	Acao  string `json:"acao"` 
+	Sinal bool   `json:"sinal"`
+	Estado string  `json:"estado"`
+	Timestamp int64 `json:"timestamp"`
 }
 
 // -------- Servico --------

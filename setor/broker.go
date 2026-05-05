@@ -61,6 +61,7 @@ type Broker struct {
 	recursos map[net.Conn]MensagemRecurso
 	drones   map[net.Conn]MensagemDrone
 
+	// Fila de Requisições
 	fila FilaPrioridade
 
 	// canais (dispatcher)
@@ -143,7 +144,7 @@ func (b *Broker) handleTCP(conn net.Conn) {
 
 	fmt.Printf("(%s) [Broker %s] - [TCP]: handshake tipo=%s id=%s\n", timeStamp(), b.id, base.Tipo, base.ID)
 
-	// Registra a conn no map apenas se não for um broker peer.
+	// Registraãa conn no map apenas se não for um broker peer (peers são registrados pela porta em handlePeer).
 	if base.Tipo != "broker" {
 		b.registrar(conn, base)
 	}
@@ -228,6 +229,15 @@ func (b *Broker) registrar(conn net.Conn, msg base) {
 		b.drones[conn] = MensagemDrone{
 			ID:        msg.ID,
 			Timestamp: msg.Timestamp,
+			Estado: "FREE",
+		}
+
+		if b.inCS {
+			fmt.Printf("(%s) [Broker %s] - [REG]: Drone conectado durante CS, enviando tarefa pendente\n", timeStamp(), b.id)
+			b.enviarParaDrone(conn) 
+		} else {
+			// Caso contrário, tenta iniciar o processo de disputa normal
+			go b.tentarDespachar()
 		}
 
 	case "broker":
@@ -398,49 +408,57 @@ func (b *Broker) handleBroker(msg MensagemBroker) {
 }
 
 func (b *Broker) handleDrone(msg MensagemDrone) {
-
-	fmt.Printf("(%s) [Broker %s] - [DRONE]: msg de %s sinal=%v\n",
-		timeStamp(), b.id, msg.ID, msg.Sinal)
+	// 1. Atualização de Logs e Timestamp para o Heartbeat Monitor
+	fmt.Printf("(%s) [Broker %s] - [DRONE]: msg de %s | Ação: %s | Sinal: %v\n",
+		timeStamp(), b.id, msg.ID, msg.Acao, msg.Sinal)
 
 	// Atualiza timestamp do drone
 	b.mu.Lock()
 	for conn, d := range b.drones {
 		if d.ID == msg.ID {
 			d.Timestamp = msg.Timestamp
+			d.Estado = msg.Estado
 			b.drones[conn] = d
 			break
 		}
 	}
 	b.mu.Unlock()
 
+	// 2. Tratamento de Conclusão de Tarefa (Sinal de saída da CS)
 	if msg.Sinal {
-		fmt.Printf("(%s) [Broker %s] - [DRONE]: conclusão recebida\n",
+		fmt.Printf("(%s) [Broker %s] - [CS]: Tarefa concluída pelo drone. Saindo da Região Crítica.\n",
 			timeStamp(), b.id)
 
 		b.mu.Lock()
-
-		if len(b.fila.Itens) > 0 {
-			b.fila.Remove()
-		}
-
+		
+		// Reset do estado de execução
 		b.inCS = false
+		b.currentReq = Requisicao{} // Limpa a requisição atual que foi processada
 
+		// 3. Gerenciamento de OKs Adiados (Ricart-Agrawala)
+		// Captura os peers que ficaram esperando enquanto este broker usava o drone
 		pendentes := b.deferred
-		b.deferred = nil
-
+		b.deferred = nil 
+		
 		b.mu.Unlock()
 
+		// Exibe fila 
+		b.fila.Listar()
+
+		// Envia as permissões (OK) para os outros brokers que solicitaram a CS
 		for _, conn := range pendentes {
-			fmt.Printf("(%s) [Broker %s] - [DRONE]: enviando OK adiado\n",
-				timeStamp(), b.id)
+			fmt.Printf("(%s) [Broker %s] - [RA]: Liberando OK adiado para peer.\n", timeStamp(), b.id)
 			b.enviarOK(conn)
 		}
 
+		// 4. Verificação de Nova Demanda
+		// Agora que liberamos a CS, verificamos se há algo novo na fila para disputar
 		go b.tentarDespachar()
 
 	} else {
-		fmt.Printf("(%s) [Broker %s] - [DRONE]: executando %s\n",
-			timeStamp(), b.id, msg.Acao)
+		// Apenas log de acompanhamento do drone
+		fmt.Printf("(%s) [Broker %s] - [DRONE]: Status recebido - %s (Estado: %s)\n",
+			timeStamp(), b.id, msg.Acao, msg.Estado)
 	}
 }
 
@@ -449,9 +467,11 @@ func (b *Broker) handleDrone(msg MensagemDrone) {
 // Retorna a prioridade para aquelas que tem maior nível ou menor timestamp
 func (b *Broker) temPrioridade(a, outro Requisicao) bool {
 	if a.Prioridade != outro.Prioridade {
+		fmt.Println("======== Ganhei por prioridade Maior =========")
 		return a.Prioridade > outro.Prioridade
 	}
 	if a.Timestamp != outro.Timestamp {
+		fmt.Println("======== Ganhei por TimeStamp Menor =========")
 		return a.Timestamp < outro.Timestamp
 	}
 	return a.Origem < outro.Origem // Caso de desempate final: a maior prioridade é por ordem alfabética entre destinatário e remetente
@@ -472,35 +492,38 @@ func (b *Broker) enviarOK(conn net.Conn) {
 // ----------- CS ----------
 
 func (b *Broker) entrarCS() {
-	b.mu.Lock()
-	b.inCS = true
-	b.requesting = false
-	b.mu.Unlock()
+    b.mu.Lock()
+    b.inCS = true
+    b.requesting = false
+    // Mantemos a b.currentReq ativa no estado do Broker até o drone terminar
+    b.mu.Unlock()
 
-	fmt.Printf("\n(%s) [Broker %s] - [CS]: >> ENTRANDO NA REGIÃO CRÍTICA << \n", timeStamp(), b.id)
+    fmt.Printf("\n(%s) [Broker %s] - [CS]: >> ENTRANDO NA REGIÃO CRÍTICA << \n", timeStamp(), b.id)
 
-	droneConn := b.escolherDrone()
-	if droneConn != nil {
-		b.enviarParaDrone(droneConn)
-	}
+    droneConn := b.escolherDrone()
+    if droneConn != nil {
+        b.enviarParaDrone(droneConn)
+    } else {
+        fmt.Printf("(%s) [Broker %s] - [CS]: Aguardando conexão de drone para processar: %+v\n", timeStamp(), b.id, b.currentReq)
+    }
 }
 
 // ----------- Drone ----------
 	
 func (b *Broker) enviarParaDrone(conn net.Conn) {
 		
-		fmt.Printf("(%s) [Broker %s] - [DRONE]: enviando requisição ao drone\n", timeStamp(), b.id)
-		
-		msg := MensagemDrone{
-			Tipo:  "drone",
-			ID:    b.id,
-			Acao:  "requisicao",
-			Sinal: false,
-		}
-		
-		data, _ := json.Marshal(msg)
-		conn.Write(append(data, '\n'))
+	fmt.Printf("(%s) [Broker %s] - [DRONE]: enviando requisição ao drone\n", timeStamp(), b.id)
+	
+	msg := MensagemDrone{
+		Tipo:  "drone",
+		ID:    b.id,
+		Acao:  "requisicao",
+		Sinal: false,
 	}
+	
+	data, _ := json.Marshal(msg)
+	conn.Write(append(data, '\n'))
+}
 	
 func (b *Broker) escolherDrone() net.Conn {
 		
@@ -508,9 +531,9 @@ func (b *Broker) escolherDrone() net.Conn {
 		defer b.mu.Unlock()
 	
 		for conn := range b.drones {
-		fmt.Printf("(%s) [Broker %s] - [DRONE]: drone selecionado\n", timeStamp(), b.id)
-		return conn
-	}
+			fmt.Printf("(%s) [Broker %s] - [DRONE]: drone selecionado\n", timeStamp(), b.id)
+			return conn
+		}
 	
 	fmt.Printf("(%s) [Broker %s] - [DRONE]: nenhum drone disponível\n", timeStamp(), b.id)
 	return nil
