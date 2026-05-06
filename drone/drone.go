@@ -180,13 +180,13 @@ func (d *Drone) handleMensagem(conn net.Conn, msg MensagemDrone) {
 
 func (d *Drone) executarTarefa(conn net.Conn) {
 
-	fmt.Printf("(%s) [Drone %s] - [DRONE]: tarefa iniciada\n", timeStamp(), d.id)
+	fmt.Printf("(%s) [Drone %s] - [DRONE]: tarefa iniciada de %v\n", timeStamp(), d.id, conn.RemoteAddr())
 
 	d.enviarMensagem(conn, "andamento", false)
 
 	fmt.Printf("(%s) [Drone %s] - [DRONE]: em execução\n", timeStamp(), d.id)
 
-	time.Sleep(5 * time.Second)
+	time.Sleep(1 * time.Second)
 
 	fmt.Printf("(%s) [Drone %s] - [DRONE]: tarefa concluída\n", timeStamp(), d.id)
 

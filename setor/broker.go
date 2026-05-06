@@ -52,8 +52,8 @@ type Broker struct {
 	requesting bool       // true enquanto aguarda OKs dos peers
 	inCS       bool       // true enquanto usa o drone (região crítica)
 	currentReq Requisicao // requisição que este broker está disputando no momento
-	okCount    int        // OKs recebidos no round atual
-	deferred   []net.Conn // conns de peers cujo OK foi adiado; receberão OK após sair da CS
+	respostasOK map[string]bool
+	deferred   []string // IDs de peers cujo OK foi adiado; receberão OK após sair da CS
 
 	// Maps de gerenciamento das conexões vivas
 	brokers  map[net.Conn]MensagemBroker
@@ -76,6 +76,7 @@ type Broker struct {
 func novoBroker(id string) *Broker {
 	b := &Broker{
 		id: id,
+		respostasOK: make(map[string]bool),
 
 		brokers:  make(map[net.Conn]MensagemBroker),
 		servicos: make(map[net.Conn]MensagemServico),
@@ -157,7 +158,7 @@ func (b *Broker) handleTCP(conn net.Conn) {
 			return
 		}
 
-		fmt.Printf("(%s) [Broker %s] - [TCP]: msg recebida %s\n", timeStamp(), b.id, msgStr)
+		//fmt.Printf("(%s) [Broker %s] - [TCP]: msg recebida %s\n", timeStamp(), b.id, msgStr)
 
 		b.dispatch(conn, []byte(msgStr))
 	}
@@ -264,7 +265,7 @@ func (b *Broker) dispatch(conn net.Conn, data []byte) {
 	base := base{}
 	json.Unmarshal(data, &base)
 
-	fmt.Printf("(%s) [Broker %s] - [DISPATCH]: tipo=%s\n", timeStamp(), b.id, base.Tipo)
+	//fmt.Printf("(%s) [Broker %s] - [DISPATCH]: tipo=%s\n", timeStamp(), b.id, base.Tipo)
 
 	switch base.Tipo {
 
@@ -358,8 +359,10 @@ func (b *Broker) handleRecurso(msg MensagemRecurso) {
 // Gerencia a recepção e o envio de mensagens de Broker com base no algoritmo Ricarti Agrawala 
 func (b *Broker) handleBroker(msg MensagemBroker) {
 	
-	fmt.Printf("(%s) [Broker %s] - [BROKER]: msg=%s origem=%s\n", timeStamp(), b.id, msg.Reply, msg.ID)
-	
+	if msg.Reply != "HEARTBEAT" { // Só exibe mensagem se não for heartbeat
+		fmt.Printf("(%s) [Broker %s] - [BROKER]: msg=%s origem=%s\n", timeStamp(), b.id, msg.Reply, msg.ID)
+	}
+
 	switch msg.Reply {
 
 	// Apenas mensagem de heartbeat para indicar que a conexão está viva
@@ -375,51 +378,62 @@ func (b *Broker) handleBroker(msg MensagemBroker) {
 		b.mu.Unlock()
 
 	case "REQUEST":
-		fmt.Printf("(%s) [Broker %s] - [RA]: REQUEST recebido\n", timeStamp(), b.id)
+        b.mu.Lock()
+        var cederPassagem bool
+        if b.inCS {
+            cederPassagem = false
+        } else if !b.requesting {
+            cederPassagem = true
+        } else {
+            cederPassagem = b.temPrioridade(msg.Requisicao, b.currentReq)
+        }
 
-		b.mu.Lock()
+        if cederPassagem {
+            // Se eu cedi para ele e estou disputando, o OK que ele me deu antes não vale mais
+            if b.requesting {
+                delete(b.respostasOK, msg.ID)
+            }
+            b.mu.Unlock()
+            b.enviarOK(msg.ID)
+        } else {
+            b.deferred = append(b.deferred, msg.ID)
+            b.mu.Unlock()
+        }
 
-		var cederPassagem bool
-		if b.inCS { // Se o Broker local estiver na região crítica, não cede passagem 
-			cederPassagem = false
-		} else if !b.requesting { // Senão se o Broker local não estiver solicitando requisição, cede passagem 
-			cederPassagem = true
-		} else { // Senão, envia a permissão de passagem para a região crítica a partir da comparação de prioridade entre requisições
-			cederPassagem = b.temPrioridade(msg.Requisicao, b.currentReq)
-		}
+    case "OK":
+        b.mu.Lock()
+        if !b.requesting {
+            b.mu.Unlock()
+            return
+        }
 
-		if cederPassagem {
-			b.mu.Unlock()
-			fmt.Printf("(%s) [Broker %s] - [RA]: enviando OK\n", timeStamp(), b.id)
-			b.broadcast(MensagemBroker{Tipo: "broker", ID: b.id, Reply: "OK"}) // Envia Ok ao Broker remoto que solicitou
-		} else {
-			for conn := range b.brokers {
-				b.deferred = append(b.deferred, conn) // Guarda conn de Broker remoto para enviar Ok após o Broker local sair da região crítica
-			}
-			b.mu.Unlock()
-			fmt.Printf("(%s) [Broker %s] - [RA]: OK adiado\n", timeStamp(), b.id)
-		}
+        b.respostasOK[msg.ID] = true
+        total := len(b.brokers)
+        recebidos := len(b.respostasOK)
 
-	case "OK":
-		b.mu.Lock()
-		b.okCount++ // Incrementa um Ok recebido
-		total := len(b.brokers)
+        fmt.Printf("(%s) [Broker %s] - [RA]: OK %d/%d\n", timeStamp(), b.id, recebidos, total)
 
-		fmt.Printf("(%s) [Broker %s] - [RA]: OK %d/%d\n", timeStamp(), b.id, b.okCount, total)
-
-		if b.okCount >= total { // Se o número de Oks for igual ao de conns de Brokers, o Broker local entra na região crítica
-			b.mu.Unlock()
-			b.entrarCS()
-		} else {
-			b.mu.Unlock()
-		}
+        if recebidos >= total {
+            // Transição ATÔMICA: define estados antes de liberar o lock
+            b.inCS = true
+            b.requesting = false
+            // Limpa o mapa para a próxima disputa
+            for k := range b.respostasOK { delete(b.respostasOK, k) }
+            
+            b.mu.Unlock()
+            b.entrarCS()
+        } else {
+            b.mu.Unlock()
+        }
 	}
 }
 
 func (b *Broker) handleDrone(msg MensagemDrone) {
 	// 1. Atualização de Logs e Timestamp para o Heartbeat Monitor
+	if msg.Acao != "heartbeat" { // Só exibe mensagem se não for heartbeat
 	fmt.Printf("(%s) [Broker %s] - [DRONE]: msg de %s | Ação: %s | Sinal: %v\n",
 		timeStamp(), b.id, msg.ID, msg.Acao, msg.Sinal)
+	}
 
 	// Atualiza timestamp do drone
 	b.mu.Lock()
@@ -443,6 +457,8 @@ func (b *Broker) handleDrone(msg MensagemDrone) {
 		// Reset do estado de execução
 		b.inCS = false
 		b.currentReq = Requisicao{} // Limpa a requisição atual que foi processada
+		b.requesting = false
+
 
 		// 3. Gerenciamento de OKs Adiados (Ricart-Agrawala)
 		// Captura os peers que ficaram esperando enquanto este broker usava o drone
@@ -455,9 +471,8 @@ func (b *Broker) handleDrone(msg MensagemDrone) {
 		b.fila.Listar()
 
 		// Envia as permissões (OK) para os outros brokers que solicitaram a CS
-		for _, conn := range pendentes {
-			fmt.Printf("(%s) [Broker %s] - [RA]: Liberando OK adiado para peer.\n", timeStamp(), b.id)
-			b.enviarOK(conn)
+		for _, id := range pendentes {
+			b.enviarOK(id)
 		}
 
 		// 4. Verificação de Nova Demanda
@@ -476,26 +491,40 @@ func (b *Broker) handleDrone(msg MensagemDrone) {
 // Retorna a prioridade para aquelas que tem maior nível ou menor timestamp
 func (b *Broker) temPrioridade(a, outro Requisicao) bool {
 	if a.Prioridade != outro.Prioridade {
-		fmt.Println("======== Ganhei por prioridade Maior =========")
 		return a.Prioridade > outro.Prioridade
 	}
 	if a.Timestamp != outro.Timestamp {
-		fmt.Println("======== Ganhei por TimeStamp Menor =========")
 		return a.Timestamp < outro.Timestamp
 	}
 	return a.Origem < outro.Origem // Caso de desempate final: a maior prioridade é por ordem alfabética entre destinatário e remetente
 }
 
-func (b *Broker) enviarOK(conn net.Conn) {
-	fmt.Printf("(%s) [Broker %s] - [RA]: enviando OK direto\n", timeStamp(), b.id)
+func (b *Broker) enviarOK(ID string) {
+	fmt.Printf("(%s) [Broker %s] - [RA]: enviando OK\n", timeStamp(), b.id)
 	
+	var c net.Conn
+	b.mu.Lock()
+	for conn, b := range b.brokers {
+		if b.ID == ID {
+			c = conn
+		}
+	}
+	
+	if c == nil {
+		b.mu.Unlock()
+		return // Não encontrou conn do Broker remetente
+	}
+	
+	b.fila.Aging() // Envelhece a fila do Broker local para cada rodada que v
+	b.mu.Unlock()
+
 	resp := MensagemBroker{
 		Tipo:  "broker",
 		ID:    b.id,
 		Reply: "OK",
 	}
 	data, _ := json.Marshal(resp)
-	conn.Write(append(data, '\n'))
+	c.Write(append(data, '\n'))
 }
 
 // ----------- CS ----------
@@ -503,7 +532,6 @@ func (b *Broker) enviarOK(conn net.Conn) {
 func (b *Broker) entrarCS() {
     b.mu.Lock()
     b.inCS = true
-    b.requesting = false
     // Mantemos a b.currentReq ativa no estado do Broker até o drone terminar
     b.mu.Unlock()
 
@@ -568,39 +596,48 @@ func (b *Broker) adicionarFila(req Requisicao) {
 // ----------- Agrawala (início) ----------
 
 func (b *Broker) tentarDespachar() {
-	
 	b.mu.Lock()
-	
+
 	fmt.Printf("(%s) [Broker %s] - [RA]: tentarDespachar Reqs na Fila=%d requesting=%v inCS=%v\n",
-	timeStamp(), b.id, len(b.fila.Itens), b.requesting, b.inCS)
-	
+		timeStamp(), b.id, len(b.fila.Itens), b.requesting, b.inCS)
+
+	// Verificação de saída: se não houver itens ou se já estivermos ocupados
 	if len(b.fila.Itens) == 0 || b.requesting || b.inCS {
 		b.mu.Unlock()
 		return
 	}
-	
+
+	// Inicia a disputa
 	b.requesting = true
-	b.okCount = 0
+	// Limpa registros de OKs antigos para esta nova rodada
+	for k := range b.respostasOK {
+		delete(b.respostasOK, k)
+	}
+	
 	b.currentReq = *b.fila.Remove()
 	totalPeers := len(b.brokers)
 	req := b.currentReq
-	
+
 	fmt.Printf("(%s) [Broker %s] - [RA]: iniciando REQUEST %+v\n", timeStamp(), b.id, req)
 	
+	// IMPORTANTE: Soltamos o lock antes de iniciar ações externas (Broadcast ou CS)
+	// para evitar que os handlers de resposta fiquem travados esperando o mutex.
 	b.mu.Unlock()
-	
+
+	// Se não há outros brokers, entra direto na região crítica
 	if totalPeers == 0 {
 		b.entrarCS()
 		return
 	}
-	
+
+	// Caso contrário, faz o broadcast do REQUEST
 	msg := MensagemBroker{
 		Tipo:       "broker",
 		ID:         b.id,
 		Reply:      "REQUEST",
 		Requisicao: req,
 	}
-	
+
 	b.broadcast(msg)
 	fmt.Printf("(%s) [Broker %s] - [RA]: REQUEST enviado\n", timeStamp(), b.id)
 }
@@ -693,7 +730,18 @@ func (b *Broker) heartbeatMonitor(timeout time.Duration) {
 		}
 
 		// -------- BROKERS --------
-		// !!!!!!!!! Broker ainda está com bug por não ser registrado com ID correto no map de Brokers !!!!!!!!!!!!!
+		for conn, msg := range b.brokers {
+			if msg.Timestamp == 0 {
+				continue
+			}
+
+			if now-msg.Timestamp > int64(timeout)*2 {
+				fmt.Printf("(%s) [HB]: BROKER %s morto\n",
+					timeStamp(), msg.ID)
+
+				mortosBrokers = append(mortosBrokers, conn)
+			}
+		}
 		
 		// -------- SERVIÇOS --------
 		for conn, msg := range b.servicos {
