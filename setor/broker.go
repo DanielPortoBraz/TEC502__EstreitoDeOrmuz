@@ -53,7 +53,7 @@ type Broker struct {
 	inCS       bool       // true enquanto usa o drone (região crítica)
 	currentReq Requisicao // requisição que este broker está disputando no momento
 	respostasOK map[string]bool
-	deferred   []string // IDs de peers cujo OK foi adiado; receberão OK após sair da CS
+	deferred   map[string]struct{} // IDs de peers cujo OK foi adiado; receberão OK após sair da CS. Garante que seja um OK por ID somente
 
 	// Maps de gerenciamento das conexões vivas
 	brokers  map[net.Conn]MensagemBroker
@@ -76,6 +76,7 @@ type Broker struct {
 func novoBroker(id string) *Broker {
 	b := &Broker{
 		id: id,
+		deferred: make(map[string]struct{}),
 		respostasOK: make(map[string]bool),
 
 		brokers:  make(map[net.Conn]MensagemBroker),
@@ -389,14 +390,10 @@ func (b *Broker) handleBroker(msg MensagemBroker) {
         }
 
         if cederPassagem {
-            // Se eu cedi para ele e estou disputando, o OK que ele me deu antes não vale mais
-            if b.requesting {
-                delete(b.respostasOK, msg.ID)
-            }
             b.mu.Unlock()
             b.enviarOK(msg.ID)
         } else {
-            b.deferred = append(b.deferred, msg.ID)
+            b.deferred[msg.ID] = struct{}{}
             b.mu.Unlock()
         }
 
@@ -461,9 +458,14 @@ func (b *Broker) handleDrone(msg MensagemDrone) {
 
 
 		// 3. Gerenciamento de OKs Adiados (Ricart-Agrawala)
-		// Captura os peers que ficaram esperando enquanto este broker usava o drone
-		pendentes := b.deferred
-		b.deferred = nil 
+		// Captura os peers que ficaram esperando enquanto este broker usava o drone/
+		pendentes := make(map[string]struct{})
+		for k := range b.deferred {
+    		pendentes[k] = struct{}{}
+		}
+		for k := range b.deferred {
+			delete(b.deferred, k) // Reseta a lista de Oks adiados
+		}
 		
 		b.mu.Unlock()
 
@@ -471,7 +473,7 @@ func (b *Broker) handleDrone(msg MensagemDrone) {
 		b.fila.Listar()
 
 		// Envia as permissões (OK) para os outros brokers que solicitaram a CS
-		for _, id := range pendentes {
+		for id := range pendentes {
 			b.enviarOK(id)
 		}
 
@@ -500,7 +502,7 @@ func (b *Broker) temPrioridade(a, outro Requisicao) bool {
 }
 
 func (b *Broker) enviarOK(ID string) {
-	fmt.Printf("(%s) [Broker %s] - [RA]: enviando OK\n", timeStamp(), b.id)
+	fmt.Printf("(%s) [Broker %s] - [RA]: enviando OK para %s\n", timeStamp(), b.id, ID)
 	
 	var c net.Conn
 	b.mu.Lock()
@@ -515,7 +517,7 @@ func (b *Broker) enviarOK(ID string) {
 		return // Não encontrou conn do Broker remetente
 	}
 	
-	b.fila.Aging() // Envelhece a fila do Broker local para cada rodada que v
+	b.fila.Aging() // Envelhece a fila do Broker local para cada rodada
 	b.mu.Unlock()
 
 	resp := MensagemBroker{
