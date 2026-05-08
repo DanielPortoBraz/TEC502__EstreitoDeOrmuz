@@ -52,7 +52,7 @@ type Broker struct {
 	requesting bool       // true enquanto aguarda OKs dos peers
 	inCS       bool       // true enquanto usa o drone (região crítica)
 	currentReq Requisicao // requisição que este broker está disputando no momento
-	respostasOK map[string]bool
+	respostasOK map[string]bool // OKs recebidos e utilizados para entrar na CS
 	deferred   map[string]struct{} // IDs de peers cujo OK foi adiado; receberão OK após sair da CS. Garante que seja um OK por ID somente
 
 	// Maps de gerenciamento das conexões vivas
@@ -379,17 +379,33 @@ func (b *Broker) handleBroker(msg MensagemBroker) {
 		b.mu.Unlock()
 
 	case "REQUEST":
+
+		dronesLivres := b.quantidadeDronesLivres()
+
         b.mu.Lock()
         var cederPassagem bool
-        if b.inCS {
-            cederPassagem = false
+        if b.inCS { // Se estou na CS, e tem drones livres para ocorrer uma disputa entre os outros Brokers, envio o OK 
+			if (dronesLivres > 1) {
+            	cederPassagem = true
+			} else {
+				cederPassagem = false
+			}
         } else if !b.requesting {
             cederPassagem = true
         } else {
-            cederPassagem = b.temPrioridade(msg.Requisicao, b.currentReq)
+
+			if b.respostasOK[msg.ID] {
+                // Se ele já me deu OK, eu não cedo passagem de jeito nenhum!
+                cederPassagem = false
+			} else {			 
+            	cederPassagem = b.temPrioridade(msg.Requisicao, b.currentReq)
+			}
         }
 
         if cederPassagem {
+			b.fila.Aging() // Envelhece a minha fila toda vez q eu dou passagem
+
+			delete(b.deferred, msg.ID) // Ao enviar OK, retiro qualquer OK adiado para aquele Broker
             b.mu.Unlock()
             b.enviarOK(msg.ID)
         } else {
@@ -399,10 +415,11 @@ func (b *Broker) handleBroker(msg MensagemBroker) {
 
     case "OK":
         b.mu.Lock()
-        if !b.requesting {
-            b.mu.Unlock()
-            return
-        }
+
+        if !b.requesting || b.inCS {
+			b.mu.Unlock()
+			return
+		}
 
         b.respostasOK[msg.ID] = true
         total := len(b.brokers)
@@ -454,7 +471,7 @@ func (b *Broker) handleDrone(msg MensagemDrone) {
 		// Reset do estado de execução
 		b.inCS = false
 		b.currentReq = Requisicao{} // Limpa a requisição atual que foi processada
-		b.requesting = false
+		if len(b.fila.Itens) == 0 {b.requesting = false} // Se a fila está vazia, para de fazer requisição
 
 
 		// 3. Gerenciamento de OKs Adiados (Ricart-Agrawala)
@@ -481,7 +498,24 @@ func (b *Broker) handleDrone(msg MensagemDrone) {
 		// Agora que liberamos a CS, verificamos se há algo novo na fila para disputar
 		go b.tentarDespachar()
 
-	} else {
+	} else if msg.Estado == "FREE" && msg.Acao != "andamento" { // Se o drone está livre, tentamos disparar a fila imediatamente
+		b.mu.Lock()
+		// Só tenta entrar se estiver na CS MAS ainda não tiver despachado a tarefa 
+		// (ou se o drone acabou de ficar livre)
+		waitDroneInCS := b.inCS
+		b.mu.Unlock()
+
+		if waitDroneInCS {
+			fmt.Printf("... Retomando tarefa ...\n")
+			conn := b.escolherDrone()
+
+			if conn != nil {
+				b.enviarParaDrone(conn)
+			}
+		} else {
+			go b.tentarDespachar()
+		}
+    } else {
 		// Apenas log de acompanhamento do drone
 		fmt.Printf("(%s) [Broker %s] - [DRONE]: Status recebido - %s (Estado: %s)\n",
 			timeStamp(), b.id, msg.Acao, msg.Estado)
@@ -516,8 +550,7 @@ func (b *Broker) enviarOK(ID string) {
 		b.mu.Unlock()
 		return // Não encontrou conn do Broker remetente
 	}
-	
-	b.fila.Aging() // Envelhece a fila do Broker local para cada rodada
+
 	b.mu.Unlock()
 
 	resp := MensagemBroker{
@@ -536,18 +569,43 @@ func (b *Broker) entrarCS() {
     b.inCS = true
     // Mantemos a b.currentReq ativa no estado do Broker até o drone terminar
     b.mu.Unlock()
-
-    fmt.Printf("\n(%s) [Broker %s] - [CS]: >> ENTRANDO NA REGIÃO CRÍTICA << \n", timeStamp(), b.id)
-
+	
+	fmt.Printf(
+		"\n(%s) [Broker %s] - [CS]: >> ENTRANDO NA REGIÃO CRÍTICA (DRONE de IP) << \n",
+		timeStamp(),
+		b.id,
+	)
     droneConn := b.escolherDrone()
-    if droneConn != nil {
-        b.enviarParaDrone(droneConn)
-    } else {
-        fmt.Printf("(%s) [Broker %s] - [CS]: Aguardando conexão de drone para processar: %+v\n", timeStamp(), b.id, b.currentReq)
-    }
+
+	if droneConn != nil {
+
+		b.enviarParaDrone(droneConn)
+	} else {
+		fmt.Printf(
+			"(%s) [Broker %s] - [CS]: Aguardando conexão de drone para processar: %+v\n",
+			timeStamp(),
+			b.id,
+			b.currentReq,
+		)
+	}
 }
 
 // ----------- Drone ----------
+
+func (b *Broker) quantidadeDronesLivres() int{
+	b.mu.Lock()
+
+	dronesLivres := 0
+	for _, d := range b.drones {
+		if d.Estado == "FREE" {
+			dronesLivres++
+		}
+	}
+
+	b.mu.Unlock()
+
+	return dronesLivres
+}
 	
 func (b *Broker) enviarParaDrone(conn net.Conn) {
 		
@@ -566,13 +624,15 @@ func (b *Broker) enviarParaDrone(conn net.Conn) {
 	
 func (b *Broker) escolherDrone() net.Conn {
 		
-		b.mu.Lock()
-		defer b.mu.Unlock()
-	
-		for conn := range b.drones {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	for conn, d := range b.drones {
+		if d.Estado == "FREE" {
 			fmt.Printf("(%s) [Broker %s] - [DRONE]: drone selecionado\n", timeStamp(), b.id)
 			return conn
 		}
+	}
 	
 	fmt.Printf("(%s) [Broker %s] - [DRONE]: nenhum drone disponível\n", timeStamp(), b.id)
 	return nil
@@ -598,41 +658,61 @@ func (b *Broker) adicionarFila(req Requisicao) {
 // ----------- Agrawala (início) ----------
 
 func (b *Broker) tentarDespachar() {
+	
+	// 1. Verificação de drones livres
+	dronesLivres := b.quantidadeDronesLivres()
+	
 	b.mu.Lock()
 
-	fmt.Printf("(%s) [Broker %s] - [RA]: tentarDespachar Reqs na Fila=%d requesting=%v inCS=%v\n",
-		timeStamp(), b.id, len(b.fila.Itens), b.requesting, b.inCS)
-
-	// Verificação de saída: se não houver itens ou se já estivermos ocupados
-	if len(b.fila.Itens) == 0 || b.requesting || b.inCS {
+	// 2. Condição de saída: fila vazia ou o broker já está ocupado com algo
+	// Adicionado check de b.requesting para evitar re-requests desnecessários
+	if len(b.fila.Itens) == 0 || b.inCS || b.requesting {
 		b.mu.Unlock()
 		return
 	}
 
-	// Inicia a disputa
+	// 3. Lógica de Bypass (Drones para todos)
+	if dronesLivres >= (len(b.brokers) + 1) {
+		b.currentReq = *b.fila.Remove()
+		fmt.Printf("(%s) [Broker %s] - [BYPASS]: Drones suficientes (%d). Despacho direto.\n", 
+			timeStamp(), b.id, dronesLivres)
+		
+		// IMPORTANTE: Definir inCS como true para evitar novos despachos enquanto o drone trabalha
+		b.inCS = true 
+		b.mu.Unlock()
+
+		conn := b.escolherDrone()
+		if conn != nil {
+			b.enviarParaDrone(conn)
+		} else {
+			// Se falhou em pegar a conn, reseta estado para tentar de novo depois
+			b.mu.Lock()
+			b.inCS = false
+			b.mu.Unlock()
+		}
+		return
+	}
+
+	// 4. Início do Ricart-Agrawala (Disputa por recurso escasso)
 	b.requesting = true
-	// Limpa registros de OKs antigos para esta nova rodada
+	// Limpa registros de OKs da rodada anterior
 	for k := range b.respostasOK {
 		delete(b.respostasOK, k)
 	}
 	
-	b.currentReq = *b.fila.Remove()
 	totalPeers := len(b.brokers)
-	req := b.currentReq
+	b.currentReq = *b.fila.Remove()
+	req := b.currentReq 
 
 	fmt.Printf("(%s) [Broker %s] - [RA]: iniciando REQUEST %+v\n", timeStamp(), b.id, req)
 	
-	// IMPORTANTE: Soltamos o lock antes de iniciar ações externas (Broadcast ou CS)
-	// para evitar que os handlers de resposta fiquem travados esperando o mutex.
-	b.mu.Unlock()
+	b.mu.Unlock() // Libera para permitir a chegada de OKs enquanto faz o broadcast
 
-	// Se não há outros brokers, entra direto na região crítica
 	if totalPeers == 0 {
 		b.entrarCS()
 		return
 	}
 
-	// Caso contrário, faz o broadcast do REQUEST
 	msg := MensagemBroker{
 		Tipo:       "broker",
 		ID:         b.id,

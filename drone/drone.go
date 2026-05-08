@@ -195,7 +195,7 @@ func (d *Drone) executarTarefa(conn net.Conn) {
 	d.mu.Unlock()
 
 	// Informa FREE para o broker liberar o slot e processar próxima req da fila
-	d.enviarMensagem(conn, "conclusao", true)
+	d.enviarMensagem(conn, "estado", true)
 
 	fmt.Printf("(%s) [Drone %s] - [DRONE]: estado=FREE\n", timeStamp(), d.id)
 }
