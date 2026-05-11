@@ -159,10 +159,10 @@ func (d *Drone) handleMensagem(conn net.Conn, msg MensagemDrone) {
 		d.mu.Lock()
 
 		if d.estado == BUSY {
-			fmt.Printf("(%s) [Drone %s] - [DRONE]: ocupado, ignorando requisição\n",
-				timeStamp(), d.id)
+			fmt.Printf("(%s) [Drone %s] - [DRONE]: ocupado, ignorando requisição de %v\n",
+				timeStamp(), d.id, conn.RemoteAddr())
 			d.mu.Unlock()
-			d.enviarMensagem(conn, "estado", false) // responde BUSY para o broker atualizar o map
+			d.enviarMensagem(conn, "rejeitado", false) // responde BUSY para o broker atualizar o map
 			return
 		}
 
@@ -186,7 +186,7 @@ func (d *Drone) executarTarefa(conn net.Conn) {
 
 	fmt.Printf("(%s) [Drone %s] - [DRONE]: em execução\n", timeStamp(), d.id)
 
-	time.Sleep(1 * time.Second)
+	time.Sleep(5 * time.Second)
 
 	fmt.Printf("(%s) [Drone %s] - [DRONE]: tarefa concluída\n", timeStamp(), d.id)
 
@@ -217,7 +217,6 @@ func main() {
 		"localhost:8000",
 		"localhost:8001",
 		"localhost:8002",
-		"localhost:8003",
 	}
 
 	id := fmt.Sprintf("drone-%d", time.Now().UnixNano()%10000)
