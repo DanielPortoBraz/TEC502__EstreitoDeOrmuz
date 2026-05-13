@@ -48,6 +48,8 @@ type Broker struct {
 
 	id string
 
+	relogioLocal int64 // Relógio Lógico (Lamport): usado em eventos significativos no uso de recursos compartilhados
+
 	// --- Estado Ricart-Agrawala (adaptado) ---
 	requesting bool       // true enquanto aguarda OKs dos peers
 	attending  bool       // true se o broker já está sendo atendido por um drone
@@ -95,6 +97,15 @@ func novoBroker(id string) *Broker {
 
 	fmt.Printf("(%s) [Broker %s] - [INIT]: Broker criado\n", timeStamp(), id)
 
+	return b
+}
+
+// -------- Utils------------
+
+func max(a, b int64) int64 {
+	if a > b {
+		return a
+	}
 	return b
 }
 
@@ -337,10 +348,15 @@ func (b *Broker) handleServico(msg MensagemServico) {
 			break
 		}
 	}
-	b.mu.Unlock()
 
+	// Evento interno (chegou tarefa), incrementa relógio
+	b.relogioLocal++
+	carimboDaTarefa := b.relogioLocal
+
+	b.mu.Unlock()
+	
 	if msg.Prioridade > 0 {
-		req := Requisicao{msg.Prioridade, msg.Timestamp, msg.ID}
+		req := Requisicao{msg.Prioridade, carimboDaTarefa, msg.ID}
 		b.adicionarFila(req)
 	}
 }
@@ -358,11 +374,14 @@ func (b *Broker) handleRecurso(msg MensagemRecurso) {
 			break
 		}
 	}
+	
+	// Evento interno (chegou tarefa), incrementa relógio
+	b.relogioLocal++
+	carimboDaTarefa := b.relogioLocal
 	b.mu.Unlock()
-
+	
 	if msg.Prioridade > 0 {
-
-		req := Requisicao{msg.Prioridade, msg.Timestamp, msg.ID}
+		req := Requisicao{msg.Prioridade, carimboDaTarefa, msg.ID}
 		b.adicionarFila(req)
 	}
 }
@@ -374,7 +393,11 @@ func (b *Broker) handleBroker(msg MensagemBroker) {
 		fmt.Printf("(%s) [Broker %s] - [BROKER]: msg=%s origem=%s\n", timeStamp(), b.id, msg.Reply, msg.ID)
 	}
 	
+	
 	b.mu.Lock()
+	// Atualiza relógio lógico para o valor mais alto (local ou remoto)
+	b.relogioLocal = max(b.relogioLocal, msg.Relogio) + 1
+
 	for conn, br := range b.brokers {
 		if br.ID == msg.ID {
 			br.Timestamp = msg.Timestamp
@@ -573,12 +596,17 @@ func (b *Broker) enviarOK(ID string) {
 		return // Não encontrou conn do Broker remetente
 	}
 
+	b.relogioLocal++ 
+	relogioAtual := b.relogioLocal
+
 	b.mu.Unlock()
 
 	resp := MensagemBroker{
 		Tipo:  "broker",
 		ID:    b.id,
 		Reply: "OK",
+		Relogio: relogioAtual,
+		Timestamp: time.Now().UnixNano(),
 	}
 	data, _ := json.Marshal(resp)
 	c.Write(append(data, '\n'))
@@ -758,10 +786,17 @@ func (b *Broker) tentarDespachar() {
 		return
 	}
 
+	b.mu.Lock()
+	b.relogioLocal++
+	relogioAtual := b.relogioLocal
+	b.mu.Unlock()
+
 	msg := MensagemBroker{
 		Tipo:       "broker",
 		ID:         b.id,
 		Reply:      "REQUEST",
+		Relogio:    relogioAtual,
+		Timestamp:  time.Now().UnixNano(),
 		Requisicao: req,
 	}
 

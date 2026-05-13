@@ -14,6 +14,7 @@ type MensagemBroker struct {
 	Tipo  string `json:"tipo"` // "broker"
 	ID    string `json:"id"`
 	Reply string `json:"reply"` // "REQUEST" | "OK"
+	Relogio int64 `json:"relogio"`
 	Timestamp int64  `json:"timestamp"`
 
 	Requisicao
