@@ -823,14 +823,68 @@ func (b *Broker) tentarDespachar() {
 
 func (b *Broker) removerConexao(conn net.Conn) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 
-	fmt.Printf("(%s) [Broker %s] - [CONN]: removendo conexão\n", timeStamp(), b.id)
+	fmt.Printf("(%s) [Broker %s] - [CONN]: removendo conexão\n",
+		timeStamp(), b.id)
 
+	// Verifica se era broker ANTES de remover
+	br, eraBroker := b.brokers[conn]
+
+	// Remove dos maps
 	delete(b.brokers, conn)
 	delete(b.servicos, conn)
 	delete(b.recursos, conn)
 	delete(b.drones, conn)
+
+	b.mu.Unlock()
+
+	// Reconexão apenas para brokers
+	if eraBroker {
+
+	b.mu.Lock()
+
+	// Remove OK pendente daquele broker morto
+	delete(b.respostasOK, br.ID)
+
+	// Remove adiamento também
+	delete(b.deferred, br.ID)
+
+	// Se eu estava esperando OKs,
+	// reavalia condição de entrada
+	if b.requesting && !b.inCS {
+
+		total := len(b.brokers)
+		recebidos := len(b.respostasOK)
+
+		fmt.Printf("(%s) [Broker %s] - [RA]: reavaliando quorum %d/%d\n",
+			timeStamp(), b.id, recebidos, total)
+
+		if recebidos >= total {
+
+			b.inCS = true
+			b.requesting = false
+
+			for k := range b.respostasOK {
+				delete(b.respostasOK, k)
+			}
+
+			b.mu.Unlock()
+
+			go b.entrarCS()
+		} else {
+			b.mu.Unlock()
+		}
+
+	} else {
+		b.mu.Unlock()
+	}
+
+	// Tenta handshake com o Broker da outra porta, mas evita que ocorrar reconexão bloqueante
+	go func() {
+		time.Sleep(3 * time.Second)
+		b.handlePeer(br.ID)
+	}()
+	}
 }
 
 // Retorna timeStamp atual
