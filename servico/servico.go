@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"crypto/tls"
 	"fmt"
 	"math/rand"
 	"net"
@@ -28,11 +29,20 @@ func timeStamp() string {
 		t.Second())
 }
 
+// Conecta por TLS (túnel criptografado)
+func conectarTLS(addr string) (net.Conn, error) {
+	config := &tls.Config{
+		InsecureSkipVerify: true,
+	}
+
+	return tls.Dial("tcp", addr, config)
+}
+
 // -------- Funções ----------
 
 func conectarBroker(addr string, msg MensagemServico) net.Conn {
 	for {
-		conn, err := net.Dial("tcp", addr)
+		conn, err := conectarTLS(addr)
 		if err != nil {
 			fmt.Printf("(%s) [Servico %s] - [CONN]: erro ao conectar %s\n", timeStamp(), msg.ID, addr)
 			time.Sleep(2 * time.Second)

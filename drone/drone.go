@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"sync"
@@ -26,6 +27,23 @@ const (
 	FREE = "FREE"
 	BUSY = "BUSY"
 )
+
+// -------- Utils --------
+
+func timeStamp() string {
+	t := time.Now()
+	return fmt.Sprintf("%d-%d-%d %d:%d:%d",
+		t.Day(), t.Month(), t.Year(),
+		t.Hour(), t.Minute(), t.Second())
+}
+
+func conectarTLS(addr string) (net.Conn, error) {
+	config := &tls.Config{
+		InsecureSkipVerify: true,
+	}
+
+	return tls.Dial("tcp", addr, config)
+}
 
 // -------- Drone --------
 
@@ -85,7 +103,7 @@ func (d *Drone) conectarBrokers() {
 
 func (d *Drone) conectarBroker(addr string) {
 	for {
-		conn, err := net.Dial("tcp", addr)
+		conn, err := conectarTLS(addr)
 		if err != nil {
 			fmt.Printf("(%s) [Drone %s] - [CONN]: erro ao conectar %s\n", timeStamp(), d.id, addr)
 			time.Sleep(2 * time.Second)
@@ -200,14 +218,6 @@ func (d *Drone) executarTarefa(conn net.Conn) {
 	fmt.Printf("(%s) [Drone %s] - [DRONE]: estado=FREE\n", timeStamp(), d.id)
 }
 
-// -------- Utils --------
-
-func timeStamp() string {
-	t := time.Now()
-	return fmt.Sprintf("%d-%d-%d %d:%d:%d",
-		t.Day(), t.Month(), t.Year(),
-		t.Hour(), t.Minute(), t.Second())
-}
 
 // -------- Main --------
 

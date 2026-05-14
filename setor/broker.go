@@ -33,6 +33,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"os"
@@ -112,7 +113,17 @@ func max(a, b int64) int64 {
 // ----------- Servidor TCP ----------
 
 func (b *Broker) iniciaServidorTCP(porta string) {
-	listener, err := net.Listen("tcp", ":"+porta)
+	cert, err := tls.LoadX509KeyPair("cert.pem", "key.pem")
+	if err != nil {
+		panic(err)
+	}
+
+	config := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+	}
+
+	listener, err := tls.Listen("tcp", ":"+porta, config)
+
 	if err != nil {
 		panic(err)
 	}
@@ -182,7 +193,11 @@ func (b *Broker) handlePeer(address string) {
 	var conn net.Conn
 
 	for {
-		c, err := net.Dial("tcp", ":"+address)
+		config := &tls.Config{
+			InsecureSkipVerify: true,
+		}
+
+		c, err := tls.Dial("tcp", ":"+address, config)
 		if err == nil {
 			conn = c
 			break
