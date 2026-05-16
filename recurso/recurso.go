@@ -105,7 +105,7 @@ func main() {
 		Timestamp: time.Now().UnixNano(),
 	}
 
-	brokerAddr := ":" + os.Args[1]
+	brokerAddr := os.Args[1]
 	conn := conectarBroker(brokerAddr, msg)
 	defer conn.Close()
 

@@ -197,7 +197,7 @@ func (b *Broker) handlePeer(address string) {
 			InsecureSkipVerify: true,
 		}
 
-		c, err := tls.Dial("tcp", ":"+address, config)
+		c, err := tls.Dial("tcp", address, config)
 		if err == nil {
 			conn = c
 			break

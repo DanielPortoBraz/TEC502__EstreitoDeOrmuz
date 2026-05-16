@@ -1,0 +1,146 @@
+version: '3.9'
+
+services:
+
+  # =========================
+  # BROKERS
+  # =========================
+
+  broker1:
+    build: ./broker
+    container_name: broker1
+    hostname: broker1
+    command:
+      [
+        "./broker",
+        "8000",
+        "broker2:8001",
+        "broker3:8002"
+      ]
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  broker2:
+    build: ./broker
+    container_name: broker2
+    hostname: broker2
+    command:
+      [
+        "./broker",
+        "8001",
+        "broker1:8000",
+        "broker3:8002"
+      ]
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+
+  broker3:
+    build: ./broker
+    container_name: broker3
+    hostname: broker3
+    command:
+      [
+        "./broker",
+        "8002",
+        "broker1:8000",
+        "broker2:8001"
+      ]
+    ports:
+      - "8002:8002"
+    restart: unless-stopped
+
+  # =========================
+  # DRONES GLOBAIS
+  # =========================
+
+  drone1:
+    build: ./drone
+    container_name: drone1
+    hostname: drone1
+    environment:
+      - BROKERS=broker1:8000,broker2:8001,broker3:8002
+    depends_on:
+      - broker1
+      - broker2
+      - broker3
+    restart: unless-stopped
+
+  drone2:
+    build: ./drone
+    container_name: drone2
+    hostname: drone2
+    environment:
+      - BROKERS=broker1:8000,broker2:8001,broker3:8002
+    depends_on:
+      - broker1
+      - broker2
+      - broker3
+    restart: unless-stopped
+
+  # =========================
+  # RECURSOS DO BROKER 1
+  # =========================
+
+  recurso_b1:
+    build: ./recurso
+    container_name: recurso_b1
+    hostname: recurso_b1
+    command: ["./recurso", "broker1:8000"]
+    depends_on:
+      - broker1
+    restart: unless-stopped
+
+  servico_b1:
+    build: ./servico
+    container_name: servico_b1
+    hostname: servico_b1
+    command: ["./servico", "broker1:8000"]
+    depends_on:
+      - broker1
+    restart: unless-stopped
+
+  # =========================
+  # RECURSOS DO BROKER 2
+  # =========================
+
+  recurso_b2:
+    build: ./recurso
+    container_name: recurso_b2
+    hostname: recurso_b2
+    command: ["./recurso", "broker2:8001"]
+    depends_on:
+      - broker2
+    restart: unless-stopped
+
+  servico_b2:
+    build: ./servico
+    container_name: servico_b2
+    hostname: servico_b2
+    command: ["./servico", "broker2:8001"]
+    depends_on:
+      - broker2
+    restart: unless-stopped
+
+  # =========================
+  # RECURSOS DO BROKER 3
+  # =========================
+
+  recurso_b3:
+    build: ./recurso
+    container_name: recurso_b3
+    hostname: recurso_b3
+    command: ["./recurso", "broker3:8002"]
+    depends_on:
+      - broker3
+    restart: unless-stopped
+
+  servico_b3:
+    build: ./servico
+    container_name: servico_b3
+    hostname: servico_b3
+    command: ["./servico", "broker3:8002"]
+    depends_on:
+      - broker3
+    restart: unless-stopped

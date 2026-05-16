@@ -6,6 +6,8 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -223,11 +225,7 @@ func (d *Drone) executarTarefa(conn net.Conn) {
 
 func main() {
 
-	brokers := []string{
-		"localhost:8000",
-		"localhost:8001",
-		"localhost:8002",
-	}
+	brokers := strings.Split(os.Getenv("BROKERS"), ",")
 
 	id := fmt.Sprintf("drone-%d", time.Now().UnixNano()%10000)
 
