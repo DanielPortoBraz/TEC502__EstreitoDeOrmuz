@@ -136,7 +136,11 @@ func (b *Broker) iniciaServidorTCP(porta string) {
 	go b.heartbeatSender(5*time.Second)
 
 	for {
-		conn, _ := listener.Accept()
+		conn, err := listener.Accept()
+		if err != nil {
+			fmt.Printf("(%s) Erro ao aceitar conexão: %v\n", timeStamp(), err)
+			continue 
+		}
 		fmt.Printf("(%s) [Broker %s] - [TCP]: novo dispositivo conectado %s\n", timeStamp(), b.id, conn.RemoteAddr())
 		go b.handleTCP(conn)
 	}
@@ -240,36 +244,39 @@ func (b *Broker) broadcast(msg MensagemBroker) {
 	}
 }
 
+
 // Registrar Conexão
 func (b *Broker) registrar(conn net.Conn, msg base) {
 
 	fmt.Printf("(%s) [Broker %s] - [REG]: tipo=%s id=%s ts=%d\n",
 		timeStamp(), b.id, msg.Tipo, msg.ID, msg.Timestamp)
 
+	b.mu.Lock()
 	switch msg.Tipo {
 
 	case "servico":
-		b.servicos[conn] = MensagemServico{
-			ID:        msg.ID,
-			Timestamp: msg.Timestamp,
-		}
-
+		b.servicos[conn] = MensagemServico{ID: msg.ID, Timestamp: msg.Timestamp}
+		
 	case "recurso":
-		b.recursos[conn] = MensagemRecurso{
-			ID:        msg.ID,
-			Timestamp: msg.Timestamp,
-		}
+		b.recursos[conn] = MensagemRecurso{ID: msg.ID, Timestamp: msg.Timestamp}
+
+	case "broker":
+		b.brokers[conn] = MensagemBroker{ID: msg.ID, Timestamp: msg.Timestamp}
 
 	case "drone":
-		b.drones[conn] = MensagemDrone{
-			ID:        msg.ID,
-			Timestamp: msg.Timestamp,
-			Estado: "BUSY",
-		}
+		b.drones[conn] = MensagemDrone{ID: msg.ID, Timestamp: msg.Timestamp, Estado: "BUSY"}
+	}
+	b.mu.Unlock()
 
-		if b.inCS{
 
-			if b.attendingConn == nil {
+	if msg.Tipo == "drone" {
+		b.mu.Lock()
+		inCS := b.inCS
+		attending := b.attendingConn
+		b.mu.Unlock()
+
+		if inCS {
+			if attending != nil {
 				fmt.Printf("(%s) [Broker %s] - [REG]: Drone conectado durante CS, enviando tarefa pendente\n", timeStamp(), b.id)
 
 				b.mu.Lock()
@@ -281,16 +288,9 @@ func (b *Broker) registrar(conn net.Conn, msg base) {
 				// Eu já estou sendo atendido e um drone ficou livre.
 				b.liberarAdiamentos()
 			}
-
 		} else {
 			// Caso contrário, tenta iniciar o processo de disputa normal
 			go b.tentarDespachar()
-		}
-
-	case "broker":
-		b.brokers[conn] = MensagemBroker{
-			ID:        msg.ID,
-			Timestamp: msg.Timestamp,
 		}
 	}
 }
