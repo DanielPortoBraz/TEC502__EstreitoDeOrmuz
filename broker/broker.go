@@ -39,6 +39,7 @@ import (
 	"os"
 	"sync"
 	"time"
+	"strings"
 )
 
 // ----------- Structs ----------
@@ -52,9 +53,9 @@ type Broker struct {
 	relogioLocal int64 // Relógio Lógico (Lamport): usado em eventos significativos no uso de recursos compartilhados
 
 	// --- Estado Ricart-Agrawala (adaptado) ---
-	requesting bool       // true enquanto aguarda OKs dos peers
-	attending  bool       // true se o broker já está sendo atendido por um drone
-	inCS       bool       // true enquanto usa o drone (região crítica)
+	requesting    bool     // true enquanto aguarda OKs dos peers
+	attendingConn net.Conn // conn do drone que está atendendo esta CS (nil = nenhum)
+	inCS          bool     // true enquanto usa o drone (região crítica)
 	currentReq Requisicao // requisição que este broker está disputando no momento
 	respostasOK map[string]bool // OKs recebidos e utilizados para entrar na CS
 	deferred   map[string]struct{} // IDs de peers cujo OK foi adiado; receberão OK após sair da CS. Garante que seja um OK por ID somente
@@ -136,7 +137,11 @@ func (b *Broker) iniciaServidorTCP(porta string) {
 	go b.heartbeatSender(5*time.Second)
 
 	for {
-		conn, _ := listener.Accept()
+		conn, err := listener.Accept()
+		if err != nil {
+			fmt.Printf("(%s) Erro ao aceitar conexão: %v\n", timeStamp(), err)
+			continue 
+		}
 		fmt.Printf("(%s) [Broker %s] - [TCP]: novo dispositivo conectado %s\n", timeStamp(), b.id, conn.RemoteAddr())
 		go b.handleTCP(conn)
 	}
@@ -168,8 +173,8 @@ func (b *Broker) handleTCP(conn net.Conn) {
 
 	fmt.Printf("(%s) [Broker %s] - [TCP]: handshake tipo=%s id=%s\n", timeStamp(), b.id, base.Tipo, base.ID)
 
-	// Registra conn no map apenas se não for um broker peer (peers são registrados pela porta em handlePeer).
-	if base.Tipo != "broker" {
+	// Registra conn no map apenas se não for um broker peer real(peers são registrados pela porta em handlePeer).
+	if base.Tipo != "broker" || strings.HasPrefix(base.ID, "tester") {
 		b.registrar(conn, base)
 	}
 
@@ -213,7 +218,7 @@ func (b *Broker) handlePeer(address string) {
 	conn.Write(append(data, '\n'))
 
 	// Registro de Broker remoto ocorre aqui para obter conn de outra porta
-	b.registrar(conn, base{Tipo: "broker", ID: address, Timestamp: time.Now().UnixNano()})
+	b.registrar(conn, base{Tipo: "broker", ID: strings.Split(address, ":")[1], Timestamp: time.Now().UnixNano()})
 }
 
 // Broadcast entre Brokers (peers)
@@ -240,40 +245,43 @@ func (b *Broker) broadcast(msg MensagemBroker) {
 	}
 }
 
+
 // Registrar Conexão
 func (b *Broker) registrar(conn net.Conn, msg base) {
 
 	fmt.Printf("(%s) [Broker %s] - [REG]: tipo=%s id=%s ts=%d\n",
 		timeStamp(), b.id, msg.Tipo, msg.ID, msg.Timestamp)
 
+	b.mu.Lock()
 	switch msg.Tipo {
 
 	case "servico":
-		b.servicos[conn] = MensagemServico{
-			ID:        msg.ID,
-			Timestamp: msg.Timestamp,
-		}
-
+		b.servicos[conn] = MensagemServico{ID: msg.ID, Timestamp: msg.Timestamp}
+		
 	case "recurso":
-		b.recursos[conn] = MensagemRecurso{
-			ID:        msg.ID,
-			Timestamp: msg.Timestamp,
-		}
+		b.recursos[conn] = MensagemRecurso{ID: msg.ID, Timestamp: msg.Timestamp}
+
+	case "broker":
+		b.brokers[conn] = MensagemBroker{ID: msg.ID, Timestamp: msg.Timestamp}
 
 	case "drone":
-		b.drones[conn] = MensagemDrone{
-			ID:        msg.ID,
-			Timestamp: msg.Timestamp,
-			Estado: "BUSY",
-		}
+		b.drones[conn] = MensagemDrone{ID: msg.ID, Timestamp: msg.Timestamp, Estado: "BUSY"}
+	}
+	b.mu.Unlock()
 
-		if b.inCS{
 
-			if !b.attending {
+	if msg.Tipo == "drone" {
+		b.mu.Lock()
+		inCS := b.inCS
+		attending := b.attendingConn
+		b.mu.Unlock()
+
+		if inCS {
+			if attending != nil {
 				fmt.Printf("(%s) [Broker %s] - [REG]: Drone conectado durante CS, enviando tarefa pendente\n", timeStamp(), b.id)
 
 				b.mu.Lock()
-				b.attending = true
+				b.attendingConn = conn
 				b.mu.Unlock()
 				
 				b.enviarParaDrone(conn) 
@@ -281,16 +289,9 @@ func (b *Broker) registrar(conn net.Conn, msg base) {
 				// Eu já estou sendo atendido e um drone ficou livre.
 				b.liberarAdiamentos()
 			}
-
 		} else {
 			// Caso contrário, tenta iniciar o processo de disputa normal
 			go b.tentarDespachar()
-		}
-
-	case "broker":
-		b.brokers[conn] = MensagemBroker{
-			ID:        msg.ID,
-			Timestamp: msg.Timestamp,
 		}
 	}
 }
@@ -459,6 +460,29 @@ func (b *Broker) handleBroker(msg MensagemBroker) {
             b.mu.Unlock()
         }
 
+	case "PING":
+		// Responde PONG; o tester mede a latência pela diferença de timestamp
+		b.mu.Lock()
+		var c net.Conn
+		for conn, br := range b.brokers {
+			if br.ID == msg.ID {
+				c = conn
+				break
+			}
+		}
+		b.mu.Unlock()
+
+		if c != nil {
+			pong := MensagemBroker{
+				Tipo:      "broker",
+				ID:        b.id,
+				Reply:     "PONG",
+				Timestamp: time.Now().UnixNano(),
+			}
+			data, _ := json.Marshal(pong)
+			c.Write(append(data, '\n'))
+		}
+
     case "OK":
         b.mu.Lock()
 
@@ -512,14 +536,14 @@ func (b *Broker) handleDrone(msg MensagemDrone) {
 		fmt.Printf("(%s) [Broker %s] - [DRONE]: Requisição rejeitada por conflito. Retentando...\n", timeStamp(), b.id)
 		
 		b.mu.Lock()
-		b.attending = false // Retira a flag: não conseguimos o drone
+		b.attendingConn = nil // Retira a conn: não conseguimos o drone
 		b.mu.Unlock()
 
 		// Tenta pegar outro drone imediatamente
 		conn := b.escolherDrone()
 		if conn != nil {
 			b.mu.Lock()
-			b.attending = true
+			b.attendingConn = conn
 			b.mu.Unlock()	
 
 			b.enviarParaDrone(conn)
@@ -536,7 +560,7 @@ func (b *Broker) handleDrone(msg MensagemDrone) {
 		
 		// Reset do estado de execução
 		b.inCS = false
-		b.attending = false
+		b.attendingConn = nil
 		b.currentReq = Requisicao{} // Limpa a requisição atual que foi processada
 		b.requesting = false 
 
@@ -557,13 +581,13 @@ func (b *Broker) handleDrone(msg MensagemDrone) {
 
 		if b.inCS { // Se eu estiver esperando CS, escolho este drone livre caso não tenha sido atendido por outro
 
-			if !b.attending {
+			if b.attendingConn == nil {
 				fmt.Printf("... Retomando tarefa ...\n")
 				conn := b.escolherDrone()
 
 				if conn != nil {
 					b.mu.Lock()
-					b.attending = true
+					b.attendingConn = conn
 					b.mu.Unlock()	
 
 					b.enviarParaDrone(conn)
@@ -658,7 +682,7 @@ func (b *Broker) entrarCS() {
 
 	if droneConn != nil {
 		b.mu.Lock()
-		b.attending = true
+		b.attendingConn = droneConn
 		b.mu.Unlock()
 
 		b.enviarParaDrone(droneConn)
@@ -754,7 +778,7 @@ func (b *Broker) tentarDespachar() {
 
 	// 2. Condição de saída: fila vazia ou o broker já está ocupado com algo
 	// Adicionado check de b.requesting para evitar re-requests desnecessários
-	if len(b.fila.Itens) == 0 || b.inCS || b.requesting || b.attending {
+	if len(b.fila.Itens) == 0 || b.inCS || b.requesting || b.attendingConn != nil {
 		b.mu.Unlock()
 		return
 	}
@@ -772,7 +796,7 @@ func (b *Broker) tentarDespachar() {
 		conn := b.escolherDrone()
 		if conn != nil {
 			b.mu.Lock()
-			b.attending = true
+			b.attendingConn = conn
 			b.mu.Unlock()
 
 			b.enviarParaDrone(conn)
@@ -827,8 +851,9 @@ func (b *Broker) removerConexao(conn net.Conn) {
 	fmt.Printf("(%s) [Broker %s] - [CONN]: removendo conexão\n",
 		timeStamp(), b.id)
 
-	// Verifica se era broker ANTES de remover
+	// Verifica se era broker ou drone ANTES de remover
 	br, eraBroker := b.brokers[conn]
+	drone, eraDrone := b.drones[conn]
 
 	// Remove dos maps
 	delete(b.brokers, conn)
@@ -838,7 +863,39 @@ func (b *Broker) removerConexao(conn net.Conn) {
 
 	b.mu.Unlock()
 
-	// Reconexão apenas para brokers
+	// -------- Drone morto --------
+	if eraDrone {
+		fmt.Printf("(%s) [Broker %s] - [CONN]: drone %s removido (estado=%s)\n",
+			timeStamp(), b.id, drone.ID, drone.Estado)
+
+		// Só age se era exatamente o drone que estava nos atendendo
+		b.mu.Lock()
+		eraONosso := b.attendingConn == conn
+		if eraONosso {
+			b.attendingConn = nil
+		}
+		wasInCS := b.inCS
+		b.mu.Unlock()
+
+		if eraONosso && wasInCS {
+			fmt.Printf("(%s) [Broker %s] - [CONN]: drone %s morreu durante CS — buscando substituto\n",
+				timeStamp(), b.id, drone.ID)
+
+			novoConn := b.escolherDrone()
+			if novoConn != nil {
+				b.mu.Lock()
+				b.attendingConn = novoConn
+				b.mu.Unlock()
+
+				b.enviarParaDrone(novoConn)
+			}
+			// Se não há drone disponível agora, registrar() cuidará disso
+			// quando um novo drone se conectar (b.inCS == true && b.attendingConn == nil)
+		}
+		return
+	}
+
+	// -------- Broker morto --------
 	if eraBroker {
 
 	b.mu.Lock()
@@ -1026,7 +1083,7 @@ func (b *Broker) heartbeatMonitor(timeout time.Duration) {
 // ----------- Main ----------
 
 func main() {
-	broker := novoBroker(os.Args[1]) // ID do Broker é a própria porta em que está rodando
+	broker := novoBroker(os.Args[1])
 	
 	for i := 2; i < len(os.Args); i++ {
 		go broker.handlePeer(os.Args[i])

@@ -144,3 +144,31 @@ services:
     depends_on:
       - broker3
     restart: unless-stopped
+
+
+  # =========================
+  # TESTER
+  # =========================
+
+  tester:
+    build: ./test
+    container_name: tester
+    hostname: tester
+
+    command:
+      [
+        "./tester",
+        "broker1:8000",
+        "broker2:8001",
+        "broker3:8002"
+      ]
+
+    depends_on:
+      - broker1
+      - broker2
+      - broker3
+
+    stdin_open: true
+    tty: true
+
+    restart: unless-stopped
