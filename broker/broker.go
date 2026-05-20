@@ -113,6 +113,21 @@ func max(a, b int64) int64 {
 
 // ----------- Servidor TCP ----------
 
+func resolveAddress(id string) string {
+	switch id {
+	case "8000":
+		return "broker1:8000"
+
+	case "8001":
+		return "broker2:8001"
+
+	case "8002":
+		return "broker3:8002"
+	}
+
+	return ""
+}
+
 func (b *Broker) iniciaServidorTCP(porta string) {
 	cert, err := tls.LoadX509KeyPair("cert.pem", "key.pem")
 	if err != nil {
@@ -194,31 +209,55 @@ func (b *Broker) handleTCP(conn net.Conn) {
 }
 
 // Comunicação com outro Broker (lado cliente)
-func (b *Broker) handlePeer(address string) {
+func (b *Broker) handlePeer(id string) {
+
+	address := resolveAddress(id)
+
 	var conn net.Conn
 
 	for {
+
 		config := &tls.Config{
 			InsecureSkipVerify: true,
 		}
 
 		c, err := tls.Dial("tcp", address, config)
+
 		if err == nil {
 			conn = c
 			break
 		}
-		fmt.Printf("(%s) [Broker %s] - [PEER]: tentando conectar %s\n", timeStamp(), b.id, address)
+
+		fmt.Printf(
+			"(%s) [Broker %s] - [PEER]: tentando conectar %s\n",
+			timeStamp(),
+			b.id,
+			address,
+		)
+
 		time.Sleep(2 * time.Second)
 	}
-	
-	fmt.Printf("(%s) [Broker %s] - [PEER]: conectado %s\n", timeStamp(), b.id, address)
 
-	
-	data, _ := json.Marshal(MensagemBroker{Tipo: "broker", ID: b.id})
+	fmt.Printf(
+		"(%s) [Broker %s] - [PEER]: conectado %s\n",
+		timeStamp(),
+		b.id,
+		address,
+	)
+
+	data, _ := json.Marshal(MensagemBroker{
+		Tipo: "broker",
+		ID:    b.id,
+	})
+
 	conn.Write(append(data, '\n'))
 
-	// Registro de Broker remoto ocorre aqui para obter conn de outra porta
-	b.registrar(conn, base{Tipo: "broker", ID: strings.Split(address, ":")[1], Timestamp: time.Now().UnixNano()})
+	// ID lógico continua sendo SOMENTE a porta
+	b.registrar(conn, base{
+		Tipo:      "broker",
+		ID:        id,
+		Timestamp: time.Now().UnixNano(),
+	})
 }
 
 // Broadcast entre Brokers (peers)
@@ -1083,10 +1122,12 @@ func (b *Broker) heartbeatMonitor(timeout time.Duration) {
 // ----------- Main ----------
 
 func main() {
-	broker := novoBroker(os.Args[1])
+	broker := novoBroker(os.Args[1]) // ID do Broker é a própria porta em que está rodando
 	
 	for i := 2; i < len(os.Args); i++ {
-		go broker.handlePeer(os.Args[i])
+		parts := strings.Split(os.Args[i], ":")
+		porta := parts[1]
+		go broker.handlePeer(porta)
 	}
 	go broker.heartbeatMonitor(5 * time.Second)
 	broker.iniciaServidorTCP(os.Args[1])
