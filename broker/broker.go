@@ -937,49 +937,69 @@ func (b *Broker) removerConexao(conn net.Conn) {
 	// -------- Broker morto --------
 	if eraBroker {
 
-	b.mu.Lock()
+		b.mu.Lock()
 
-	// Remove OK pendente daquele broker morto
-	delete(b.respostasOK, br.ID)
+		fmt.Printf("(%s) [Broker %s] - [CONN]: broker %s removido\n",
+			timeStamp(), b.id, br.ID)
 
-	// Remove adiamento também
-	delete(b.deferred, br.ID)
+		// Remove OK pendente daquele broker morto
+		delete(b.respostasOK, br.ID)
 
-	// Se eu estava esperando OKs,
-	// reavalia condição de entrada
-	if b.requesting && !b.inCS {
+		// Remove adiamento também
+		delete(b.deferred, br.ID)
+
+		// Evita estado zumbi:
+		// requesting=true sem requisição válida
+		if b.requesting && b.currentReq.Origem == "" {
+			b.requesting = false
+		}
+
+		// Captura estado atual
+		requesting := b.requesting
+		inCS := b.inCS
 
 		total := len(b.brokers)
 		recebidos := len(b.respostasOK)
 
-		fmt.Printf("(%s) [Broker %s] - [RA]: reavaliando quorum %d/%d\n",
+		fmt.Printf("(%s) [Broker %s] - [RA]: quorum após remoção %d/%d\n",
 			timeStamp(), b.id, recebidos, total)
 
-		if recebidos >= total {
+		b.mu.Unlock()
 
-			b.inCS = true
-			b.requesting = false
-
-			for k := range b.respostasOK {
-				delete(b.respostasOK, k)
-			}
-
-			b.mu.Unlock()
-
-			go b.entrarCS()
-		} else {
-			b.mu.Unlock()
+		// Se não estou mais na CS,
+		// libero possíveis OKs presos
+		if !inCS {
+			go b.liberarAdiamentos()
 		}
 
-	} else {
-		b.mu.Unlock()
-	}
+		// Reavalia disputa após mudança do quorum
+		if requesting && !inCS {
 
-	// Tenta handshake com o Broker da outra porta, mas evita que ocorrar reconexão bloqueante
-	go func() {
-		time.Sleep(3 * time.Second)
-		b.handlePeer(br.ID)
-	}()
+			if recebidos >= total {
+
+				fmt.Printf("(%s) [Broker %s] - [RA]: quorum reavaliado com sucesso\n",
+					timeStamp(), b.id)
+
+				b.mu.Lock()
+
+				b.requesting = false
+
+				for k := range b.respostasOK {
+					delete(b.respostasOK, k)
+				}
+
+				b.mu.Unlock()
+
+				// Recomeça fluxo de despacho
+				go b.tentarDespachar()
+			}
+		}
+
+		// Reconexão assíncrona
+		go func() {
+			time.Sleep(3 * time.Second)
+			b.handlePeer(br.ID)
+		}()
 	}
 }
 
