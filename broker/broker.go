@@ -115,15 +115,17 @@ func max(a, b int64) int64 {
 // ----------- Servidor TCP ----------
 
 func resolveAddress(id string) string {
+
 	switch id {
+
 	case "8000":
-		return "broker1:8000"
+		return "x.x.x.1:8000"
 
 	case "8001":
-		return "broker2:8001"
+		return "x.x.x.2:8001"
 
 	case "8002":
-		return "broker3:8002"
+		return "x.x.x.3:8002"
 	}
 
 	return ""
@@ -1144,9 +1146,7 @@ func main() {
 	broker := novoBroker(os.Args[1]) // ID do Broker é a própria porta em que está rodando
 	
 	for i := 2; i < len(os.Args); i++ {
-		parts := strings.Split(os.Args[i], ":")
-		porta := parts[1]
-		go broker.handlePeer(porta)
+		go broker.handlePeer(os.Args[i])
 	}
 	go broker.heartbeatMonitor(5 * time.Second)
 	broker.iniciaServidorTCP(os.Args[1])
