@@ -56,4 +56,26 @@ services:
     depends_on:
       - broker1
 
+
+    restart: unless-stopped
+
+  tester:
+    build: ./test
+
+    container_name: tester
+
+    command:
+      [
+        "./tester",
+        "x.x.x.1:8000",
+        "x.x.x.2:8001",
+        "x.x.x.3:8002"
+      ]
+
+    depends_on:
+      - broker1
+
+    stdin_open: true
+    tty: true
+
     restart: unless-stopped
